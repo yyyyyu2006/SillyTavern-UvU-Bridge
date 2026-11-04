@@ -1,0 +1,12 @@
+{
+  "display_name": "UvU Story Bridge",
+  "loading_order": 10,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "yyyyyu2006",
+  "version": "0.1.0",
+  "homePage": "https://github.com/yyyyyu2006/SillyTavern-UvU-Bridge",
+  "auto_update": true
+}
