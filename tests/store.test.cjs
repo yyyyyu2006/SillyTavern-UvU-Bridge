@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { createBridgeStore } = require('../server/store.js');
+const bridgeText = require('../story-text.js');
 
 function event(source, eventId, overrides = {}) {
     return { source, eventId, kind: 'memory_packet', characterKey: 'char-a', createdAt: 1,
@@ -40,11 +41,32 @@ test('events are idempotent and delivered only to the opposite app', async () =>
     assert.equal(store.listEvents('uvu', 0).events.length, 0);
 });
 
+test('large online message parts are retained until complete and then reassembled once', () => {
+    const pending = {};
+    assert.equal(bridgeText.addMessagePart(pending, 'archive:message-1', { messagePart: 2, messagePartCount: 2, text: '后半段' }), null);
+    assert.equal(bridgeText.addMessagePart(pending, 'archive:message-1', { messagePart: 2, messagePartCount: 2, text: '后半段' }), null);
+    const complete = bridgeText.addMessagePart(pending, 'archive:message-1', { messagePart: 1, messagePartCount: 2, text: '前半段' });
+    assert.equal(complete.text, '前半段后半段');
+    assert.equal(Object.hasOwn(pending, 'archive:message-1'), false);
+    bridgeText.addMessagePart(pending, 'bad', { messagePart: 1, messagePartCount: 2, text: 'a' });
+    assert.throws(() => bridgeText.addMessagePart(pending, 'bad', { messagePart: 2, messagePartCount: 3, text: 'b' }), /分段总数/);
+});
+
 test('source spoofing, invalid modes, and oversized event bodies are rejected', async () => {
     const store = createBridgeStore();
     await assert.rejects(store.appendEvent(event('sillytavern', 'evt-2'), 'uvu'), /source/);
     await assert.rejects(store.appendEvent(event('uvu', 'evt-3', { payload: { text: 'x'.repeat(50 * 1024) } }), 'uvu'), /48 KiB/);
     await assert.rejects(store.setMode({ characterKey: 'char-a', mode: 'unknown' }), /Invalid mode/);
+});
+
+test('scene events validate their part contract and stable retries reject changed content', async () => {
+    const store = createBridgeStore();
+    const invalid = event('sillytavern', 'scene-bad', { kind: 'scene_transcript', sceneId: 'scene-a', payload: { part: 3, partCount: 2, text: 'bad' } });
+    await assert.rejects(store.appendEvent(invalid, 'sillytavern'), /Invalid scene parts/);
+    const valid = event('sillytavern', 'scene-good', { kind: 'scene_transcript', sceneId: 'scene-a', payload: { part: 1, partCount: 1, text: 'story' } });
+    assert.equal((await store.appendEvent(valid, 'sillytavern')).duplicate, false);
+    assert.equal((await store.appendEvent(valid, 'sillytavern')).duplicate, true);
+    await assert.rejects(store.appendEvent({ ...valid, payload: { part: 1, partCount: 1, text: 'changed' } }, 'sillytavern'), /conflicts/);
 });
 
 test('independent cursors resume each direction without losing sequence ordering', async () => {
@@ -75,7 +97,7 @@ test('events, cursors, and modes survive a local restart', async t => {
     const filePath = path.join(directory, 'data.json');
     const first = createBridgeStore({ filePath });
     await first.load();
-    await first.appendEvent(event('sillytavern', 'scene-1', { kind: 'scene_transcript' }), 'sillytavern');
+    await first.appendEvent(event('sillytavern', 'scene-1', { kind: 'scene_transcript', sceneId: 'scene-1', payload: { part: 1, partCount: 1, text: 'offline scene' } }), 'sillytavern');
     await first.acknowledge('uvu', 1);
     await first.setMode({ characterKey: 'char-a', mode: 'offline', sceneId: 'scene-1' });
 

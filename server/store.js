@@ -26,6 +26,11 @@ function validateEvent(input, source) {
     if (!characterKey || characterKey.length > 200) throw new Error('Invalid characterKey');
     if (!EVENT_KINDS.has(kind)) throw new Error('Unsupported event kind');
     if (input.payload == null || typeof input.payload !== 'object' || Array.isArray(input.payload)) throw new Error('Invalid event payload');
+    if (kind === 'scene_transcript') {
+        const { part, partCount, text } = input.payload;
+        if (!Number.isInteger(part) || !Number.isInteger(partCount) || partCount < 1 || partCount > 2000 || part < 1 || part > partCount || typeof text !== 'string') throw new Error('Invalid scene parts');
+        if (input.payload.partHash && input.payload.partHash !== digest(text)) throw new Error('Scene checksum mismatch');
+    }
     const payload = JSON.stringify(input.payload);
     if (Buffer.byteLength(payload, 'utf8') > 48 * 1024) throw new Error('Event payload exceeds 48 KiB');
     const createdAt = Number(input.createdAt);
@@ -133,7 +138,10 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         return mutate(() => {
             const clean = validateEvent(input, source);
             const duplicate = state.events.find(event => event.source === source && event.eventId === clean.eventId);
-            if (duplicate) return { event: duplicate, duplicate: true };
+            if (duplicate) {
+                if (duplicate.characterKey !== clean.characterKey || duplicate.sceneId !== clean.sceneId || JSON.stringify(duplicate.payload) !== JSON.stringify(clean.payload)) throw new Error('Event ID conflicts with previous content');
+                return { event: duplicate, duplicate: true };
+            }
             const event = { ...clean, seq: state.nextSeq++ };
             state.events.push(event);
             if (state.events.length > capacity) {

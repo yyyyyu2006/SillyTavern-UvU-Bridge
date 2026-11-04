@@ -1,3 +1,4 @@
+import './story-text.js';
 import { getContext } from '../../../extensions.js';
 import { extension_prompt_types } from '../../../../script.js';
 
@@ -11,6 +12,7 @@ let pollTimer;
 let directoryTimer;
 let pollBusy = false;
 let directoryRefreshBusy = false;
+let sceneBusy = false;
 
 function settings() {
     const root = context.extensionSettings;
@@ -19,6 +21,7 @@ function settings() {
 }
 
 function activeStKey() {
+    context = getContext();
     if (context.groupId != null) return `group:${context.groupId}`;
     const character = context.characters?.[context.characterId];
     return character ? `character:${character.avatar || character.name || context.characterId}` : '';
@@ -29,6 +32,7 @@ function activeUvuKey() {
 }
 
 function currentStLabel() {
+    context = getContext();
     if (context.groupId != null) return `群聊：${context.groups?.[context.groupId]?.name || context.groupId}`;
     const character = context.characters?.[context.characterId];
     return character ? `酒馆角色：${character.name || context.name2 || '未命名'}（${activeStKey()}）` : '当前未选择酒馆角色';
@@ -67,18 +71,26 @@ async function refreshCharacterDirectory() {
 }
 
 function sceneText(messages) {
-    return messages.filter(message => message && !message.is_system && !message.is_hidden && !message.is_thinking &&
-        (message.is_user || message.name || message.mes)).map(message => {
-        let text = String(message.mes || '').replace(/<(thinking|think|analysis|reasoning|cot|status|statusbar|status_panel)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
-            .replace(/<img\b[^>]*>/gi, '[图片略]')
-            .replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '[图片略]').trim();
+    context = getContext();
+    return messages.filter(message => message && !message.is_system && !message.is_hidden && !message.is_thinking).map(message => {
+        const text = globalThis.UvUBridgeText.clean(message.mes, settings().excludeTags || '');
         if (!text) return '';
-        const who = message.is_user ? (context.name1 || 'User') : (message.name || context.name2 || 'Character');
-        const rawStamp = message.send_date || message.timestamp || 0;
-        const stamp = Number(rawStamp) || Date.parse(rawStamp) || 0;
-        const time = stamp > 0 ? new Date(stamp).toISOString() : '';
-        return `[${time} | ${who}]\n${text}`;
+        const raw = message.send_date || message.timestamp;
+        const stamp = raw ? (Number(raw) || Date.parse(raw)) : NaN;
+        const time = Number.isFinite(stamp) && stamp > 0 ? new Date(stamp).toISOString() : '时间未知';
+        return '[' + time + ' | ' + (message.is_user ? context.name1 || 'User' : message.name || context.name2 || 'Character') + ']\n' + text;
     }).filter(Boolean).join('\n\n');
+}
+
+async function checksum(text) {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function sceneIdentity(scene) {
+    context = getContext();
+    if (!scene || scene.stCharacterKey !== activeStKey() || scene.characterKey !== activeUvuKey() ||
+        scene.chatId !== String(context.getCurrentChatId?.() || context.chatId || '')) throw new Error('角色、绑定或聊天已切换，请返回本场剧情原来的聊天。');
 }
 
 function splitSceneText(text, maxCodePoints = 8000) {
@@ -98,16 +110,18 @@ function splitSceneText(text, maxCodePoints = 8000) {
 }
 
 async function request(path, options = {}) {
+    const signal = options.signal || AbortSignal.timeout(15000);
     const method = String(options.method || 'GET').toUpperCase();
     const headers = { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-        const csrfResponse = await fetch('/csrf-token', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+        const csrfResponse = await fetch('/csrf-token', { signal, credentials: 'same-origin', headers: { Accept: 'application/json' } });
         const csrf = await csrfResponse.json().catch(() => ({}));
         if (!csrfResponse.ok || !csrf.token) throw new Error('Could not obtain the SillyTavern CSRF token. Refresh the Tavern page and try again.');
         headers['X-CSRF-Token'] = csrf.token;
     }
     const response = await fetch(`${API}${path}`, {
         ...options,
+        signal,
         method,
         credentials: 'same-origin',
         headers,
@@ -127,13 +141,14 @@ function showStatus(message, error = false) {
 
 function memoryPrompt(key) {
     const data = settings().packetsByCharacter[key] || {};
-    const candidates = (data.items || []).filter(item => item && item.text).slice(-12);
+    const candidates = (data.items || []).filter(item => item && item.selected === true && item.text && (!data.sourceArchiveId || !item.archiveId || item.archiveId === data.sourceArchiveId));
     const entries = [];
     let used = 0;
     for (const item of candidates.reverse()) {
-        if (used >= 6000) break;
-        const remaining = 6000 - used;
-        const text = String(item.text).slice(-Math.min(2400, remaining));
+        if (used >= 12000) break;
+        const remaining = 12000 - used;
+        const text = String(item.text);
+        if (text.length > remaining) continue;
         entries.unshift({ ...item, text });
         used += text.length;
     }
@@ -150,40 +165,104 @@ function updatePrompt() {
 }
 
 async function pollEvents() {
+    context = getContext();
     if (pollBusy || document.visibilityState !== 'visible' || !activeUvuKey()) return;
     pollBusy = true;
     const key = activeUvuKey();
     try {
         const cursor = Number(settings().cursorByCharacter[key] || 0);
-        const result = await request(`/ui/events?after=${cursor}&characterKey=${encodeURIComponent(key)}`);
-        if (result.gapDetected) showStatus('桥接队列已超出保留范围；请在 UvU 重新同步连续性记忆。', true);
-        const memoryState = settings().packetsByCharacter[key] || { mode: 'online', items: [] };
-        const items = memoryState.items || [];
-        let nextCursor = cursor;
+        const result = await request('/ui/events?after=' + cursor + '&characterKey=' + encodeURIComponent(key));
+        if (result.gapDetected) throw new Error('桥接队列有缺口；请在 UvU 使用“交接线上剧情”重新发送所需范围。');
+        if ((result.events || []).some(item => item.characterKey !== key)) throw new Error('收到的角色 ID 不一致，已停止同步。');
+        const previous = settings().packetsByCharacter[key] || { mode: 'online', items: [] };
+        const next = structuredClone(previous), items = next.items || [];
+        next.pendingMessageParts = next.pendingMessageParts || {};
+        const ids = new Set(items.map(item => item.eventId));
+        let nextCursor = cursor, received = 0;
         for (const event of result.events || []) {
-            nextCursor = Math.max(nextCursor, event.seq);
-            if (event.kind === 'memory_packet' || event.kind === 'phone_exchange') {
-                const text = String(event.payload?.text || event.payload?.summary || '').trim();
-                if (text) items.push({ eventId: event.eventId, title: String(event.payload?.title || '').slice(0, 160), text: text.slice(-6000), createdAt: event.createdAt, mode: event.kind });
+            nextCursor = Math.max(nextCursor, Number(event.seq) || 0);
+            if (!['memory_packet', 'phone_exchange'].includes(event.kind)) continue;
+            const payload = event.payload || {};
+            const records = Array.isArray(payload.messages) ? payload.messages : [{ id: event.eventId, text: payload.text || payload.summary, createdAt: event.createdAt }];
+            for (const record of records) {
+                const sourceId = String(record.sourceMessageId || record.id || event.eventId);
+                const id = payload.archiveId ? payload.archiveId + ':' + sourceId : sourceId;
+                if (ids.has(id)) continue;
+                const hasParts = record.messagePart !== undefined || record.messagePartCount !== undefined;
+                const complete = hasParts
+                    ? globalThis.UvUBridgeText.addMessagePart(next.pendingMessageParts, id, record)
+                    : { text: record.text, createdAt: record.createdAt };
+                if (!complete) continue;
+                const text = globalThis.UvUBridgeText.clean(complete.text);
+                if (!text) continue;
+                ids.add(id); received++;
+                items.push({ eventId: id, title: String(payload.title || 'UvU 线上剧情').slice(0, 160), text,
+                    createdAt: Number(complete.createdAt) || Number(record.createdAt) || event.createdAt, archiveId: payload.archiveId || '', selected: false });
             }
+            if (payload.archiveId && !next.sourceArchiveId) next.sourceArchiveId = payload.archiveId;
         }
-        const mode = await request(`/ui/state?characterKey=${encodeURIComponent(key)}`);
-        settings().packetsByCharacter[key] = { mode: mode.mode, items: items.slice(-12) };
-        settings().cursorByCharacter[key] = nextCursor;
-        await request('/ui/ack', { method: 'POST', body: { seq: nextCursor, characterKey: key } });
-        await context.saveSettingsDebounced();
-        updatePrompt();
-        showStatus(`已连接 · 收到 ${result.events?.length || 0} 条新记忆`);
-    } catch (error) {
-        showStatus(error.message, true);
-    } finally { pollBusy = false; }
+        if (items.length > 500) throw new Error('在线记忆已达 500 条，请先删除不需要的条目后重试；本批未确认。');
+        const mode = await request('/ui/state?characterKey=' + encodeURIComponent(key));
+        if (activeUvuKey() !== key) return;
+        next.items = items; next.mode = mode.mode;
+        if ((result.events || []).length || previous.mode !== mode.mode) {
+            settings().packetsByCharacter[key] = next;
+            settings().cursorByCharacter[key] = nextCursor;
+            await context.saveSettingsDebounced();
+        }
+        if (nextCursor > cursor) await request('/ui/ack', { method: 'POST', body: { seq: nextCursor, characterKey: key } });
+        updatePrompt(); renderOnlineReview();
+        if (received) showStatus('收到 ' + received + ' 条在线剧情，请在下方审核勾选后应用。');
+    } catch (error) { showStatus(error.message, true); }
+    finally { pollBusy = false; }
+}
+
+function renderOnlineReview() {
+    const host = panel?.querySelector('[data-online-review]');
+    if (!host) return;
+    const key = activeUvuKey(), data = settings().packetsByCharacter[key] || { items: [] };
+    const signature = JSON.stringify([key, data.sourceArchiveId, data.items]);
+    if (host.dataset.signature === signature) return;
+    host.dataset.signature = signature;
+    host.replaceChildren();
+    if (!data.items?.length) { host.textContent = '尚未收到在线剧情。请先在 UvU 交接所需聊天范围。'; return; }
+    const label = document.createElement('label'); label.textContent = '本场使用的 UvU 存档';
+    const select = document.createElement('select');
+    for (const id of [...new Set(data.items.map(item => item.archiveId || ''))]) select.add(new Option(id || '旧版未标注存档', id));
+    select.value = data.sourceArchiveId || '';
+    select.addEventListener('change', async () => { data.sourceArchiveId = select.value; await context.saveSettingsDebounced(); updatePrompt(); renderOnlineReview(); });
+    label.append(select); host.append(label);
+    const list = document.createElement('div'); list.className = 'uvu-bridge-review-list';
+    data.items.forEach(item => {
+        if ((item.archiveId || '') !== (data.sourceArchiveId || '')) return;
+        const row = document.createElement('details'), title = document.createElement('summary');
+        const check = document.createElement('input'); check.type = 'checkbox'; check.checked = item.selected === true;
+        check.dataset.item = item.eventId;
+        check.addEventListener('click', event => event.stopPropagation());
+        title.append(check, document.createTextNode(item.text.slice(0, 65)));
+        const text = document.createElement('textarea'); text.value = item.text; text.dataset.itemText = item.eventId;
+        const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '删除这条';
+        remove.addEventListener('click', async () => { data.items = data.items.filter(entry => entry !== item); await context.saveSettingsDebounced(); updatePrompt(); renderOnlineReview(); });
+        row.append(title, text, remove); list.append(row);
+    });
+    const save = document.createElement('button'); save.type = 'button'; save.textContent = '保存勾选与编辑';
+    save.addEventListener('click', async () => {
+        if (activeUvuKey() !== key) return;
+        host.querySelectorAll('[data-item]').forEach(check => { const item = data.items.find(entry => entry.eventId === check.dataset.item); if (item) item.selected = check.checked; });
+        host.querySelectorAll('[data-item-text]').forEach(text => { const item = data.items.find(entry => entry.eventId === text.dataset.itemText); if (item) item.text = globalThis.UvUBridgeText.clean(text.value); });
+        await context.saveSettingsDebounced(); updatePrompt(); renderOnlineReview();
+        showStatus('审核已保存。开启“在线记忆加入酒馆线下上下文”后，在本场线下/手机模式生效；单轮正文预算 12000 字符，优先最近且完整的条目。');
+    });
+    host.append(list, save);
 }
 
 async function setMode(mode) {
+    context = getContext();
+    if (settings().scene) sceneIdentity(settings().scene);
     const characterKey = activeUvuKey();
     if (!characterKey) throw new Error('先从角色下拉列表选择对应的 UvU 角色。');
     const sceneId = mode === 'online' ? '' : settings().scene?.id || '';
-    const state = await request('/ui/state', { method: 'PUT', body: { characterKey, mode, sceneId } });
+    const state = await request('/ui/state', { method: 'PUT', body: { characterKey, mode, sceneId, archiveId: settings().scene?.uvuArchiveId || '' } });
     const packets = settings().packetsByCharacter[characterKey] || { items: [] };
     settings().packetsByCharacter[characterKey] = { ...packets, mode: state.mode };
     await context.saveSettingsDebounced();
@@ -192,38 +271,55 @@ async function setMode(mode) {
 }
 
 async function startScene() {
+    context = getContext();
+    if (!activeStKey() || !String(context.getCurrentChatId?.() || context.chatId || '')) throw new Error('请先在酒馆打开对应角色的私聊，再绑定并开始剧情。');
+    if (sceneBusy) throw new Error('当前操作尚未完成，请稍候。');
     if (settings().scene) throw new Error('先结束当前线下剧情，再开始新的一场。');
     if (context.groupId != null) throw new Error('当前桥接只支持酒馆单角色聊天；请先打开对应角色的私聊，再开始线下剧情。');
     const characterKey = activeUvuKey();
     if (!characterKey) throw new Error('先从角色下拉列表选择对应的 UvU 角色。');
     if (!settings().uvuCharacters?.some(character => character.id === characterKey)) throw new Error('当前绑定 ID 不在 UvU 角色目录中。请先在 UvU 连接页重新配对或刷新角色列表，再选择正确角色。');
-    settings().scene = { id: crypto.randomUUID(), characterKey, stCharacterKey: activeStKey(), chatId: String(context.getCurrentChatId?.() || context.chatId || ''), startIndex: context.chat.length, startedAt: Date.now() };
-    await setMode('offline');
-    await context.saveSettingsDebounced();
-    showStatus('线下剧情已开始；UvU 消息不会自动触发酒馆生成。');
+    const packets = settings().packetsByCharacter[characterKey] || {};
+    const draft = { id: crypto.randomUUID(), characterKey, stCharacterKey: activeStKey(),
+        uvuArchiveId: packets.sourceArchiveId || '', chatId: String(context.getCurrentChatId?.() || context.chatId || ''), startIndex: context.chat.length, startedAt: Date.now() };
+    sceneBusy = true;
+    settings().scene = draft;
+    try { await setMode('offline'); await context.saveSettingsDebounced(); }
+    catch (error) { settings().scene = null; await context.saveSettingsDebounced(); throw error; }
+    finally { sceneBusy = false; }
+    showStatus('已记录本场起点。关闭面板，在酒馆聊天框输入开场；不会自动发消息或跳转。');
 }
 
 async function endScene() {
+    context = getContext();
     const scene = settings().scene;
-    if (!scene) throw new Error('当前没有进行中的线下剧情。');
-    if (scene.chatId !== String(context.getCurrentChatId?.() || context.chatId || '')) throw new Error('当前酒馆聊天已切换；请返回开始剧情时的聊天再导出。');
-    if (scene.stCharacterKey !== activeStKey() || scene.characterKey !== activeUvuKey()) throw new Error('角色绑定已变化；为避免剧情记忆归错角色，请切回原酒馆角色并恢复原 UvU 绑定后再导出。');
-    const transcript = sceneText(context.chat.slice(scene.startIndex));
-    if (!transcript) throw new Error('当前剧情没有可导出的有效文本。');
-    const chunks = splitSceneText(transcript);
-    for (let index = 0; index < chunks.length; index++) {
-        await request('/ui/events', { method: 'POST', body: {
-            source: 'sillytavern', eventId: `${scene.id}:transcript:${index + 1}`, kind: 'scene_transcript',
-            characterKey: scene.characterKey, sceneId: scene.id, createdAt: scene.startedAt,
-            payload: { title: `酒馆线下剧情 ${new Date(scene.startedAt).toLocaleDateString()}`, text: chunks[index],
-                part: index + 1, partCount: chunks.length, stCharacterKey: scene.stCharacterKey,
-                messageStart: scene.startIndex, messageEnd: context.chat.length },
-        } });
+    sceneIdentity(scene);
+    if (!scene.exportParts) {
+        const transcript = sceneText(context.chat.slice(scene.startIndex));
+        if (!transcript) throw new Error('本场没有有效剧情，可点“结束空场”恢复线上。');
+        const parts = splitSceneText(transcript);
+        scene.exportParts = [];
+        for (let i = 0; i < parts.length; i++) scene.exportParts.push({ text: parts[i], partHash: await checksum(parts[i]) });
+        scene.messageEnd = context.chat.length;
+        await context.saveSettingsDebounced();
     }
-    await setMode('online');
-    settings().scene = null;
-    await context.saveSettingsDebounced();
-    showStatus('剧情已导出到 UvU 记忆收件箱；原酒馆聊天未修改。');
+    sceneBusy = true;
+    try {
+        for (let index = 0; index < scene.exportParts.length; index++) {
+            sceneIdentity(scene);
+            const item = scene.exportParts[index];
+            await request('/ui/events', { method: 'POST', body: {
+                source: 'sillytavern', eventId: scene.id + ':transcript:' + (index + 1), kind: 'scene_transcript',
+                characterKey: scene.characterKey, sceneId: scene.id, createdAt: scene.startedAt,
+                payload: { title: '酒馆线下剧情 ' + new Date(scene.startedAt).toLocaleDateString(), ...item,
+                    part: index + 1, partCount: scene.exportParts.length, stCharacterKey: scene.stCharacterKey,
+                    uvuArchiveId: scene.uvuArchiveId, messageStart: scene.startIndex, messageEnd: scene.messageEnd }
+            } });
+        }
+        sceneIdentity(scene);
+        await setMode('online'); settings().scene = null; await context.saveSettingsDebounced();
+        showStatus('导出完成。回 UvU“酒馆互通”审核剧情并逐条勾选；默认不进入上下文。');
+    } finally { sceneBusy = false; }
 }
 
 async function refreshPairCode() {
@@ -281,6 +377,19 @@ function renderPanel() {
             <button type="button" data-action="close-phone">收起手机</button>
             <button type="button" data-action="end-scene">结束并导出</button>
           </div>
+          <label>额外排除标签（逗号分隔，如 status_box）<input type="text" data-exclude-tags placeholder="只影响导出副本"></label>
+          <button type="button" data-action="cancel-scene">结束空场 / 放弃本场导出</button>
+          <details><summary>收到的线上剧情：逐条审核</summary><div data-online-review></div></details>
+          <details><summary>具体操作教程与功能说明</summary>
+            <ol><li><strong>先配对设备：</strong>打开 UvU“设置 → 酒馆互通”，保持本页在前台；在本扩展点“生成配对码”，把 6 位码填入 UvU 并点“连接 / 配对”。首次连接按浏览器提示允许访问本机网络；状态变成“已配对”才算完成。</li>
+            <li><strong>核对角色：</strong>在酒馆打开目标角色的私聊，不要停留在群聊；从“绑定到 UvU 角色”选择对应角色，检查面板显示的酒馆角色名和 UvU 角色名/ID。人设、用户设定和头像不会自动复制，两边仍各自维护。</li>
+            <li><strong>把线上背景交给酒馆：</strong>在 UvU“酒馆互通”选角色、当前存档及消息起止编号，点“交接所选范围”。消息编号从 1 开始；回酒馆展开“收到的线上剧情”，在存档下拉框选来源存档，再展开每条记录核对、编辑或勾选，最后点“保存勾选与编辑”。未保存或未勾选内容不会被使用。</li>
+            <li><strong>开启记忆：</strong>勾选“在线记忆加入酒馆线下上下文”。仅当前绑定角色、当前来源存档中已勾选的记录可进入线下/手机模式的扩展记忆；取消勾选会暂停注入，但保留已审核记录。</li>
+            <li><strong>开始线下剧情：</strong>确认仍在正确的酒馆私聊，点“开始线下剧情”，再回聊天框手动输入开场并发送。按钮只切换模式、记录起点，不会自动跳转角色或生成消息。</li>
+            <li><strong>临时使用手机：</strong>线下剧情中点“拿出手机”，UvU 用自己的 API 正常回复；点“收起手机”后，后续剧情继续留在酒馆。酒馆旁白不会自动变成 UvU 消息，需要明确拿出手机并在 UvU 聊天。</li>
+            <li><strong>导出并审核线下记忆：</strong>回到原酒馆聊天点“结束并导出”；在 UvU 点“收取酒馆记忆”，展开待审核剧情、查看过滤后的原文并逐条编辑/勾选后保存。只有审核通过且勾选的条目进入普通上下文或向量候选。导出中断时回原聊天重试，会继续发送同一份冻结内容。</li>
+            <li><strong>暂停和结束：</strong>切换角色前先结束本场；没有剧情要交接时点“结束空场 / 放弃本场导出”。手机后台可能暂停轮询，回到前台后再点“收取酒馆记忆”或等待自动同步；不要把后台轮询当作实时推送。</li></ol>
+          </details>
           <p class="uvu-bridge-help">角色目录由已配对的 UvU 页面提供。开始前请核对上方“酒馆角色 → UvU 角色名（ID）”；角色切换或绑定变化时会阻止导出，避免记忆写错对象。</p>
           </div>
         </div>
@@ -288,13 +397,19 @@ function renderPanel() {
     host.append(panel);
     console.info('[UvU Bridge] Control panel mounted in SillyTavern extension settings.');
 
+    const exclude = panel.querySelector('[data-exclude-tags]');
+    exclude.value = settings().excludeTags || '';
+    exclude.addEventListener('change', () => { settings().excludeTags = exclude.value; context.saveSettingsDebounced(); });
     const charInput = panel.querySelector('[data-uvu-character]');
     charInput.addEventListener('change', async () => {
+        context = getContext();
+        if (!activeStKey() || context.groupId != null) { charInput.value = ''; showStatus('请先打开酒馆角色私聊，再绑定 UvU 角色。', true); return; }
         if (charInput.value) settings().characterLinks[activeStKey()] = charInput.value;
         else delete settings().characterLinks[activeStKey()];
         await context.saveSettingsDebounced();
         updateLinkField();
         updatePrompt();
+        renderOnlineReview();
         pollEvents();
     });
     updateLinkField();
@@ -309,6 +424,8 @@ function renderPanel() {
         const action = event.target.closest('button')?.dataset.action;
         if (!action) return;
         try {
+            if (sceneBusy) throw new Error('当前剧情操作尚未完成，请稍候。');
+            if (action === 'cancel-scene') { const scene = settings().scene; sceneIdentity(scene); if (!confirm('结束本场并恢复线上？尚未导出的内容仍保留在酒馆原聊天。')) return; await setMode('online'); settings().scene = null; await context.saveSettingsDebounced(); showStatus('本场已结束，未删除原聊天。'); }
             if (action === 'refresh-characters') {
                 await refreshCharacterDirectory();
                 showStatus(`已载入 ${settings().uvuCharacters.length} 个 UvU 角色。`);
@@ -348,10 +465,12 @@ function init() {
     updatePrompt();
     startPolling();
     context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
+        context = getContext();
         const scene = settings().scene;
         if (scene && scene.chatId !== String(context.getCurrentChatId?.() || context.chatId || '')) showStatus('酒馆聊天已切换；请返回原聊天结束并导出场景。', true);
         updateLinkField();
         updatePrompt();
+        renderOnlineReview();
     });
 }
 
