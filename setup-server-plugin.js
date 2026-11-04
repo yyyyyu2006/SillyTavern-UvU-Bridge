@@ -84,6 +84,10 @@ function configureCors(yaml, origin) {
             block[setting.index] = `${prefix} [${merged.map(value => JSON.stringify(value)).join(', ')}]`;
             continue;
         }
+        if (inline === '[]') {
+            const comment = /\s+#.*$/.exec(keyLine)?.[0] || '';
+            block[setting.index] = `${prefix}${comment}`;
+        }
 
         const keyIndent = setting.indent.length;
         const listIndexes = [];

@@ -68,6 +68,8 @@ test('setup script merges CORS entries without removing existing origins or meth
     assert.match(yaml, /- DELETE/);
     assert.equal((yaml.match(/- OPTIONS/g) || []).length, 1);
     assert.equal((yaml.match(/- POST/g) || []).length, 1);
+    assert.match(yaml, /allowedHeaders:\n\s+- Content-Type\n\s+- Authorization/);
+    assert.doesNotMatch(yaml, /allowedHeaders:\s*\[\]\s*\n\s+-/);
 });
 
 test('setup script refuses an unrecognized CORS value without changing files', async t => {
