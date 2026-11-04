@@ -33,3 +33,13 @@ All routes are mounted below `/api/plugins/uvu-story-bridge`. The browser client
 - `POST /client/revoke`: revoke the paired token.
 
 The server plugin never calls an LLM. UvU keeps using its existing API and prompt logic. SillyTavern memory is provided to its normal generation as a separate extension prompt only when the user has enabled that integration.
+
+## Mode and memory lifecycle
+
+- `online`: UvU replies normally. Completed turns can be relayed as `memory_packet` records for the mapped SillyTavern character.
+- `offline`: UvU checks this state before a private-chat generation and does not request a reply.
+- `phone`: UvU may reply; its completed turn is tagged `phone_exchange`.
+- Ending a SillyTavern scene exports ordered `scene_transcript` parts. UvU stores a complete scene as a draft journal after all parts arrive and are saved. It is not favorited by default.
+- Enabling scene-memory injection in UvU favorites imported bridge journals. This uses the app's existing favorite-memory context path. No base prompt text or prompt assembly code is replaced.
+
+The sequence queue is a local relay, not a shared live transcript. Each side retains its own original conversation. A scene transcript is imported only after all declared parts are present; if the queue reports a gap, the client must not claim a complete import.
