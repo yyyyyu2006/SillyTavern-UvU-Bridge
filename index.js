@@ -98,9 +98,19 @@ function splitSceneText(text, maxCodePoints = 8000) {
 }
 
 async function request(path, options = {}) {
+    const method = String(options.method || 'GET').toUpperCase();
+    const headers = { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+        const csrfResponse = await fetch('/csrf-token', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+        const csrf = await csrfResponse.json().catch(() => ({}));
+        if (!csrfResponse.ok || !csrf.token) throw new Error('Could not obtain the SillyTavern CSRF token. Refresh the Tavern page and try again.');
+        headers['X-CSRF-Token'] = csrf.token;
+    }
     const response = await fetch(`${API}${path}`, {
         ...options,
-        headers: { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers },
+        method,
+        credentials: 'same-origin',
+        headers,
         body: options.body ? JSON.stringify(options.body) : undefined,
     });
     const data = await response.json().catch(() => ({}));

@@ -3,6 +3,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { createBridgeStore } = require('./store.js');
+const { createClientHttpServer } = require('./client-http.js');
 
 const ROUTE_PREFIX = '/v1';
 const DATA_DIR = path.join(__dirname, 'data');
@@ -11,6 +12,7 @@ const store = createBridgeStore({ filePath: path.join(DATA_DIR, 'bridge-state.js
 let configPromise;
 let initialized = false;
 const pairFailures = new Map();
+let clientHttpServer = null;
 
 async function loadConfig() {
     if (configPromise) return configPromise;
@@ -22,6 +24,9 @@ async function loadConfig() {
         return {
             allowedOrigins: [...new Set(origins.map(value => String(value).trim()).filter(value => /^https:\/\//i.test(value)))],
             maxPayloadBytes: Math.max(1024, Math.min(65536, Number(loaded.maxPayloadBytes) || 65536)),
+            clientPort: Number.isInteger(Number(loaded.clientPort)) && Number(loaded.clientPort) >= 1024 && Number(loaded.clientPort) <= 65535
+                ? Number(loaded.clientPort)
+                : 8765,
         };
     })();
     return configPromise;
@@ -198,10 +203,29 @@ module.exports = {
             initialized = true;
         }
         attachRoutes(router);
+        if (!clientHttpServer?.listening) {
+            const options = await loadConfig();
+            clientHttpServer = createClientHttpServer({ store, loadConfig });
+            await new Promise((resolve, reject) => {
+                clientHttpServer.once('error', reject);
+                clientHttpServer.listen(options.clientPort, '127.0.0.1', () => {
+                    clientHttpServer.removeListener('error', reject);
+                    console.info(`[UvU Bridge] UvU client API listening on 127.0.0.1:${options.clientPort}.`);
+                    resolve();
+                });
+            }).catch(error => {
+                clientHttpServer = null;
+                console.error('[UvU Bridge] Could not start the loopback client API:', error.message);
+            });
+        }
         console.info('[UvU Bridge] Local bridge routes registered.');
     },
     exit() {
         initialized = false;
+        if (clientHttpServer) {
+            clientHttpServer.close();
+            clientHttpServer = null;
+        }
         console.info('[UvU Bridge] Stopped.');
     },
     _test: { attachRoutes, store, loadConfig },

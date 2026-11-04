@@ -27,12 +27,12 @@ test('setup script applies changes only after explicit confirmation and backs up
     assert.equal(run.status, 0, run.stderr);
     const yaml = await fs.readFile(path.join(tavern, 'config.yaml'), 'utf8');
     assert.match(yaml, /enableServerPlugins: true # leave comment/);
-    assert.match(yaml, /origin:\n\s+- "https:\/\/uvu\.example"/);
-    assert.match(yaml, /methods:\n\s+- OPTIONS\n\s+- GET\n\s+- POST\n\s+- PUT/);
-    assert.match(yaml, /allowedHeaders:\n\s+- Content-Type\n\s+- Authorization/);
-    assert.match(run.stdout, /全局 CORS 会允许该网页来源/);
+    assert.doesNotMatch(yaml, /^cors:/m);
+    assert.match(run.stdout, /仅监听 127\.0\.0\.1:8765/);
+    assert.match(run.stdout, /不会修改 SillyTavern 全局 CORS/);
     const cors = JSON.parse(await fs.readFile(path.join(plugin, 'server', 'config.json'), 'utf8'));
     assert.deepEqual(cors.allowedOrigins, ['https://default.example', 'https://uvu.example']);
+    assert.equal(cors.clientPort, 8765);
     assert.ok((await fs.readdir(tavern)).some(name => name.startsWith('config.yaml.uvu-bridge-') && name.endsWith('.bak')));
 });
 
@@ -45,7 +45,7 @@ test('setup script cancellation leaves files unchanged', async t => {
     await assert.rejects(fs.access(path.join(plugin, 'server', 'config.json')));
 });
 
-test('setup script merges CORS entries without removing existing origins or methods', async t => {
+test('setup script leaves existing global CORS configuration untouched', async t => {
     const initial = [
         'port: 8000',
         'enableServerPlugins: true',
@@ -63,21 +63,5 @@ test('setup script merges CORS entries without removing existing origins or meth
     const run = spawnSync(process.execPath, [path.join(plugin, 'setup-server-plugin.js')], { input: 'https://uvu.example\nAPPLY\n', encoding: 'utf8' });
     assert.equal(run.status, 0, run.stderr);
     const yaml = await fs.readFile(path.join(tavern, 'config.yaml'), 'utf8');
-    assert.match(yaml, /- "https:\/\/existing\.example"/);
-    assert.match(yaml, /- "https:\/\/uvu\.example"/);
-    assert.match(yaml, /- DELETE/);
-    assert.equal((yaml.match(/- OPTIONS/g) || []).length, 1);
-    assert.equal((yaml.match(/- POST/g) || []).length, 1);
-    assert.match(yaml, /allowedHeaders:\n\s+- Content-Type\n\s+- Authorization/);
-    assert.doesNotMatch(yaml, /allowedHeaders:\s*\[\]\s*\n\s+-/);
-});
-
-test('setup script refuses an unrecognized CORS value without changing files', async t => {
-    const initial = 'port: 8000\nenableServerPlugins: false\ncors:\n  enabled: true\n  origin: null\n  methods:\n    - OPTIONS\n  allowedHeaders: []\n';
-    const { tavern, plugin } = await fixture(t, initial);
-    const run = spawnSync(process.execPath, [path.join(plugin, 'setup-server-plugin.js')], { input: 'https://uvu.example\nAPPLY\n', encoding: 'utf8' });
-    assert.notEqual(run.status, 0);
-    assert.match(run.stderr, /无法安全识别 cors\.origin/);
-    assert.equal(await fs.readFile(path.join(tavern, 'config.yaml'), 'utf8'), initial);
-    await assert.rejects(fs.access(path.join(plugin, 'server', 'config.json')));
+    assert.equal(yaml, initial);
 });

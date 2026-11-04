@@ -2,5 +2,6 @@
   "allowedOrigins": [
     "https://yyyyyu2006.github.io"
   ],
+  "clientPort": 8765,
   "maxPayloadBytes": 65536
 }

@@ -1,6 +1,6 @@
 # Bridge protocol
 
-All routes are mounted below `/api/plugins/uvu-story-bridge`. The browser client must use the local SillyTavern origin and send requests only after an explicit user gesture. Do not put bearer tokens in URLs.
+The SillyTavern panel routes are mounted below `/api/plugins/uvu-story-bridge` and use SillyTavern's same-origin CSRF token. UvU client routes are served by a separate loopback-only listener on `127.0.0.1:<clientPort>` (default `8765`) so they do not bypass or disable SillyTavern's global CSRF protection. The browser client must send requests only after an explicit user gesture. Do not put bearer tokens in URLs.
 
 ## Event envelope
 
@@ -24,13 +24,15 @@ All routes are mounted below `/api/plugins/uvu-story-bridge`. The browser client
 ## Route contract
 
 - `GET /ui/pair-code`: loopback-only, for the SillyTavern extension panel.
-- `POST /client/pair`: exchange a short-lived code for a bearer token.
+- `POST /client/pair`: exchange a short-lived code for a bearer token on the loopback client listener.
 - `GET /ui/events?after=<seq>`: loopback-only events from UvU waiting for SillyTavern.
 - `GET /client/events?after=<seq>`: authenticated events from SillyTavern waiting for UvU.
 - `POST /ui/events` and `POST /client/events`: append source-tagged events.
 - `POST /ui/ack` and `POST /client/ack`: acknowledge imported sequence numbers.
 - `GET /ui/state` and `PUT /ui/state`: read or update the linked character and scene mode.
 - `POST /client/revoke`: revoke the paired token.
+
+The client listener accepts only loopback connections and exact origins listed in `server/config.json`. Configure its port with `clientPort`; update UvU's bridge address to match.
 
 The server plugin never calls an LLM. UvU keeps using its existing API and prompt logic. SillyTavern memory is provided to its normal generation as a separate extension prompt only when the user has enabled that integration.
 
