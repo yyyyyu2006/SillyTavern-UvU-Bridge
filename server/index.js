@@ -113,7 +113,7 @@ function attachRoutes(router) {
     clientCors(router);
 
     router.get(`${ROUTE_PREFIX}/health`, localUi, async (req, res) => {
-        res.json({ ok: true, paired: store.hasPairedClient(), version: '0.1.0' });
+        res.json({ ok: true, paired: store.hasPairedClient(), version: '0.2.0' });
     });
 
     router.get(`${ROUTE_PREFIX}/ui/pair-code`, localUi, (req, res) => {
@@ -146,6 +146,14 @@ function attachRoutes(router) {
     router.put(`${ROUTE_PREFIX}/client/state`, requireClient, async (req, res) => {
         if (bodySize(req) > 2048) return sendError(res, 413, 'Request is too large.');
         try { res.json(await store.setMode(req.body)); }
+        catch (error) { sendError(res, 400, error.message); }
+    });
+    router.get(`${ROUTE_PREFIX}/ui/characters`, localUi, (_req, res) => {
+        res.json({ characters: store.listCharacters() });
+    });
+    router.put(`${ROUTE_PREFIX}/client/characters`, requireClient, async (req, res) => {
+        if (bodySize(req) > 64 * 1024) return sendError(res, 413, 'Character directory is too large.');
+        try { res.json({ characters: await store.setCharacters(req.body?.characters) }); }
         catch (error) { sendError(res, 400, error.message); }
     });
 
@@ -182,7 +190,7 @@ module.exports = {
         id: 'uvu-story-bridge',
         name: 'UvU Story Bridge',
         description: 'Authenticated local event and memory relay for UvU.',
-        version: '0.1.0',
+        version: '0.2.0',
     },
     async init(router) {
         if (!initialized) {

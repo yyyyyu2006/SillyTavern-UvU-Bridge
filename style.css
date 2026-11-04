@@ -1,9 +1,10 @@
 .uvu-bridge-panel {
-    display: grid;
-    gap: 8px;
     padding: 10px 0;
     max-width: 560px;
 }
+
+.uvu-bridge-fields { display: flex; flex-direction: column; gap: 8px; }
+.uvu-bridge-identity { margin: 0; padding: 8px; border-left: 3px solid var(--SmartThemeQuoteColor, #6595d8); background: var(--SmartThemeBlurTintColor, rgba(127, 127, 127, 0.1)); overflow-wrap: anywhere; }
 
 .uvu-bridge-panel h3,
 .uvu-bridge-panel p { margin: 0; }
@@ -15,4 +16,5 @@
 .uvu-bridge-panel .uvu-bridge-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .uvu-bridge-panel button { min-height: 34px; padding: 5px 10px; }
 .uvu-bridge-panel output { min-width: 76px; font: 600 1.05em ui-monospace, monospace; letter-spacing: 0.12em; }
-.uvu-bridge-panel .uvu-bridge-help { opacity: 0.8; font-size: 0.85em; }
+.uvu-bridge-panel .uvu-bridge-help { margin: 0; opacity: 0.8; font-size: 0.85em; }
+.uvu-bridge-panel select { width: 100%; min-height: 38px; }

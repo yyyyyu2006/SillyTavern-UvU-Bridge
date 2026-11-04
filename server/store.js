@@ -9,7 +9,7 @@ const MODES = new Set(['online', 'offline', 'phone']);
 const SOURCES = new Set(['uvu', 'sillytavern']);
 
 function emptyState() {
-    return { version: 1, nextSeq: 1, events: [], cursors: {}, gaps: {}, modes: {}, tokenHash: null };
+    return { version: 1, nextSeq: 1, events: [], cursors: {}, gaps: {}, modes: {}, characters: [], tokenHash: null };
 }
 
 function digest(value) {
@@ -87,6 +87,7 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
                 cursors: raw.cursors && typeof raw.cursors === 'object' && !Array.isArray(raw.cursors) ? raw.cursors : {},
                 gaps: raw.gaps && typeof raw.gaps === 'object' && !Array.isArray(raw.gaps) ? raw.gaps : {},
                 modes: raw.modes && typeof raw.modes === 'object' && !Array.isArray(raw.modes) ? raw.modes : {},
+                characters: Array.isArray(raw.characters) ? raw.characters.filter(item => item && typeof item.id === 'string' && typeof item.name === 'string').slice(0, 200) : [],
                 events: raw.events.filter(event => event && SOURCES.has(event.source) && SOURCES.has(event.target) && EVENT_KINDS.has(event.kind)),
                 nextSeq: Math.max(1, Number(raw.nextSeq) || 1),
                 tokenHash: typeof raw.tokenHash === 'string' ? raw.tokenHash : null,
@@ -172,6 +173,26 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         return value ? { ...value } : { mode: 'online', characterKey: String(characterKey || ''), sceneId: '', updatedAt: 0 };
     }
 
+    function listCharacters() {
+        return state.characters.map(character => ({ ...character }));
+    }
+
+    async function setCharacters(input) {
+        if (!Array.isArray(input) || input.length > 200) throw new Error('Invalid character directory');
+        const seen = new Set();
+        const characters = input.map(item => {
+            const id = String(item?.id || '').trim();
+            const name = String(item?.name || '').trim();
+            if (!id || id.length > 200 || !name || name.length > 120 || seen.has(id)) throw new Error('Invalid character directory entry');
+            seen.add(id);
+            return { id, name };
+        });
+        return mutate(() => {
+            state.characters = characters;
+            return listCharacters();
+        });
+    }
+
     async function setMode(input) {
         const characterKey = String(input?.characterKey || '').trim();
         const mode = String(input?.mode || '');
@@ -184,7 +205,7 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         });
     }
 
-    return { load, createPairCode, claimPair, isAuthorized, hasPairedClient, revokeToken, appendEvent, listEvents, acknowledge, getMode, setMode };
+    return { load, createPairCode, claimPair, isAuthorized, hasPairedClient, revokeToken, appendEvent, listEvents, acknowledge, getMode, setMode, listCharacters, setCharacters };
 }
 
 module.exports = { createBridgeStore, validateEvent, EVENT_KINDS, MODES, SOURCES };

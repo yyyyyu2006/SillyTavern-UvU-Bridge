@@ -85,6 +85,14 @@ test('events, cursors, and modes survive a local restart', async t => {
     assert.equal(restored.getMode('char-a').sceneId, 'scene-1');
 });
 
+test('UvU character directory is validated, persisted, and returned without extra fields', async () => {
+    const store = createBridgeStore();
+    assert.deepEqual(await store.setCharacters([{ id: 'char-1', name: '小明' }]), [{ id: 'char-1', name: '小明' }]);
+    assert.deepEqual(store.listCharacters(), [{ id: 'char-1', name: '小明' }]);
+    await assert.rejects(store.setCharacters([{ id: 'same', name: 'A' }, { id: 'same', name: 'B' }]), /directory entry/);
+    await assert.rejects(store.setCharacters([{ id: '', name: 'No ID' }]), /directory entry/);
+});
+
 test('failed persistence rolls back the in-memory event so retry is not mistaken for success', async t => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'uvu-bridge-fail-'));
     t.after(() => fs.rm(directory, { recursive: true, force: true }));

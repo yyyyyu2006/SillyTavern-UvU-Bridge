@@ -8,7 +8,9 @@ const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, cursorByChar
 let context;
 let panel;
 let pollTimer;
+let directoryTimer;
 let pollBusy = false;
+let directoryRefreshBusy = false;
 
 function settings() {
     const root = context.extensionSettings;
@@ -26,9 +28,42 @@ function activeUvuKey() {
     return String(settings().characterLinks[activeStKey()] || '').trim();
 }
 
+function currentStLabel() {
+    if (context.groupId != null) return `群聊：${context.groups?.[context.groupId]?.name || context.groupId}`;
+    const character = context.characters?.[context.characterId];
+    return character ? `酒馆角色：${character.name || context.name2 || '未命名'}（${activeStKey()}）` : '当前未选择酒馆角色';
+}
+
 function updateLinkField() {
-    const input = panel?.querySelector('[data-uvu-character]');
-    if (input) input.value = activeUvuKey();
+    const select = panel?.querySelector('[data-uvu-character]');
+    if (!select) return;
+    const key = activeUvuKey();
+    if (key && ![...select.options].some(option => option.value === key)) {
+        const legacy = new Option(`未在角色目录中：${key}`, key, true, true);
+        select.add(legacy);
+    }
+    select.value = key;
+    const identity = panel.querySelector('[data-current-identity]');
+    const selected = settings().uvuCharacters?.find(character => character.id === key);
+    if (identity) identity.textContent = `${currentStLabel()} → ${selected ? `${selected.name}（${selected.id}）` : key ? `未识别的 UvU ID：${key}` : '尚未绑定 UvU 角色'}`;
+}
+
+async function refreshCharacterDirectory() {
+    if (directoryRefreshBusy) return settings().uvuCharacters || [];
+    directoryRefreshBusy = true;
+    try {
+        const result = await request('/ui/characters');
+        settings().uvuCharacters = Array.isArray(result.characters) ? result.characters : [];
+        const select = panel?.querySelector('[data-uvu-character]');
+        if (select) {
+            select.replaceChildren(new Option('请选择 UvU 角色', ''));
+            for (const character of settings().uvuCharacters) {
+                select.add(new Option(`${character.name}（${character.id}）`, character.id));
+            }
+            updateLinkField();
+        }
+        return settings().uvuCharacters;
+    } finally { directoryRefreshBusy = false; }
 }
 
 function sceneText(messages) {
@@ -136,7 +171,7 @@ async function pollEvents() {
 
 async function setMode(mode) {
     const characterKey = activeUvuKey();
-    if (!characterKey) throw new Error('先填写对应的 UvU 角色 ID。');
+    if (!characterKey) throw new Error('先从角色下拉列表选择对应的 UvU 角色。');
     const sceneId = mode === 'online' ? '' : settings().scene?.id || '';
     const state = await request('/ui/state', { method: 'PUT', body: { characterKey, mode, sceneId } });
     const packets = settings().packetsByCharacter[characterKey] || { items: [] };
@@ -149,7 +184,8 @@ async function setMode(mode) {
 async function startScene() {
     if (settings().scene) throw new Error('先结束当前线下剧情，再开始新的一场。');
     const characterKey = activeUvuKey();
-    if (!characterKey) throw new Error('先填写对应的 UvU 角色 ID。');
+    if (!characterKey) throw new Error('先从角色下拉列表选择对应的 UvU 角色。');
+    if (!settings().uvuCharacters?.some(character => character.id === characterKey)) throw new Error('当前绑定 ID 不在 UvU 角色目录中。请先在 UvU 连接页重新配对或刷新角色列表，再选择正确角色。');
     settings().scene = { id: crypto.randomUUID(), characterKey, stCharacterKey: activeStKey(), chatId: String(context.getCurrentChatId?.() || context.chatId || ''), startIndex: context.chat.length, startedAt: Date.now() };
     await setMode('offline');
     await context.saveSettingsDebounced();
@@ -160,6 +196,7 @@ async function endScene() {
     const scene = settings().scene;
     if (!scene) throw new Error('当前没有进行中的线下剧情。');
     if (scene.chatId !== String(context.getCurrentChatId?.() || context.chatId || '')) throw new Error('当前酒馆聊天已切换；请返回开始剧情时的聊天再导出。');
+    if (scene.stCharacterKey !== activeStKey() || scene.characterKey !== activeUvuKey()) throw new Error('角色绑定已变化；为避免剧情记忆归错角色，请切回原酒馆角色并恢复原 UvU 绑定后再导出。');
     const transcript = sceneText(context.chat.slice(scene.startIndex));
     if (!transcript) throw new Error('当前剧情没有可导出的有效文本。');
     const chunks = splitSceneText(transcript);
@@ -189,36 +226,67 @@ async function refreshPairCode() {
 
 function renderPanel() {
     if (panel) return;
-    const host = document.querySelector('#extensions_settings .inline-drawer-content') || document.querySelector('#extensions_settings') || document.body;
+    const host = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
+    if (!host) {
+        if (!renderPanel.observer && document.body && typeof MutationObserver !== 'undefined') {
+            renderPanel.observer = new MutationObserver(() => {
+                if (document.querySelector('#extensions_settings2, #extensions_settings')) {
+                    renderPanel.observer.disconnect();
+                    renderPanel.observer = null;
+                    renderPanel();
+                }
+            });
+            renderPanel.observer.observe(document.body, { childList: true, subtree: true });
+            setTimeout(() => {
+                renderPanel.observer?.disconnect();
+                renderPanel.observer = null;
+            }, 15000);
+        }
+        return false;
+    }
     panel = document.createElement('section');
     panel.id = `${EXTENSION_ID}-panel`;
-    panel.className = 'uvu-bridge-panel';
+    panel.className = 'extension_container uvu-bridge-panel';
     panel.innerHTML = `
-      <h3>UvU Story Bridge</h3>
-      <p data-bridge-status role="status">等待本机桥接服务</p>
-      <label>对应的 UvU 角色 ID<input type="text" data-uvu-character autocomplete="off" placeholder="在 UvU 角色详情中复制 ID"></label>
-      <div class="uvu-bridge-row">
-        <button type="button" data-action="pair">生成配对码</button>
-        <output data-pair-code aria-live="polite">------</output>
-      </div>
-      <label class="uvu-bridge-check"><input type="checkbox" data-inject-memory> 在线记忆注入线下剧情</label>
-      <div class="uvu-bridge-row">
-        <button type="button" data-action="start-scene">开始线下剧情</button>
-        <button type="button" data-action="phone-mode">拿出手机</button>
-        <button type="button" data-action="close-phone">收起手机</button>
-        <button type="button" data-action="end-scene">结束并导出</button>
-      </div>
-      <p class="uvu-bridge-help">只同步当前关联角色。线下剧情以独立记录发送到 UvU；需要用户确认的记忆注入由扩展开关控制。</p>`;
+      <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+          <b>UvU Story Bridge · 线下剧情互通</b>
+          <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+          <div class="uvu-bridge-fields">
+          <p data-bridge-status role="status">等待本机桥接服务</p>
+          <p class="uvu-bridge-identity" data-current-identity>正在读取角色...</p>
+          <label>绑定到 UvU 角色<select data-uvu-character autocomplete="off"><option value="">先从 UvU 同步角色目录</option></select></label>
+          <div class="uvu-bridge-row">
+            <button type="button" data-action="refresh-characters">刷新 UvU 角色</button>
+            <button type="button" data-action="pair">生成配对码</button>
+            <output data-pair-code aria-live="polite">------</output>
+          </div>
+          <label class="uvu-bridge-check"><input type="checkbox" data-inject-memory> 在线记忆加入酒馆线下上下文</label>
+          <div class="uvu-bridge-row">
+            <button type="button" data-action="start-scene">开始线下剧情</button>
+            <button type="button" data-action="phone-mode">拿出手机</button>
+            <button type="button" data-action="close-phone">收起手机</button>
+            <button type="button" data-action="end-scene">结束并导出</button>
+          </div>
+          <p class="uvu-bridge-help">角色目录由已配对的 UvU 页面提供。开始前请核对上方“酒馆角色 → UvU 角色名（ID）”；角色切换或绑定变化时会阻止导出，避免记忆写错对象。</p>
+          </div>
+        </div>
+      </div>`;
     host.append(panel);
+    console.info('[UvU Bridge] Control panel mounted in SillyTavern extension settings.');
 
     const charInput = panel.querySelector('[data-uvu-character]');
-    charInput.value = activeUvuKey();
     charInput.addEventListener('change', async () => {
-        settings().characterLinks[activeStKey()] = charInput.value.trim();
+        if (charInput.value) settings().characterLinks[activeStKey()] = charInput.value;
+        else delete settings().characterLinks[activeStKey()];
         await context.saveSettingsDebounced();
+        updateLinkField();
         updatePrompt();
         pollEvents();
     });
+    updateLinkField();
     const inject = panel.querySelector('[data-inject-memory]');
     inject.checked = settings().injectMemory === true;
     inject.addEventListener('change', async () => {
@@ -230,6 +298,10 @@ function renderPanel() {
         const action = event.target.closest('button')?.dataset.action;
         if (!action) return;
         try {
+            if (action === 'refresh-characters') {
+                await refreshCharacterDirectory();
+                showStatus(`已载入 ${settings().uvuCharacters.length} 个 UvU 角色。`);
+            }
             if (action === 'pair') await refreshPairCode();
             if (action === 'start-scene') await startScene();
             if (action === 'phone-mode') {
@@ -245,11 +317,15 @@ function renderPanel() {
             if (action === 'end-scene') await endScene();
         } catch (error) { showStatus(error.message, true); }
     });
+    refreshCharacterDirectory().catch(error => showStatus(`角色列表尚未就绪：${error.message}。请先在 UvU 连接页完成配对。`, true));
+    return true;
 }
 
 function startPolling() {
     clearInterval(pollTimer);
+    clearInterval(directoryTimer);
     pollTimer = setInterval(pollEvents, 4000);
+    directoryTimer = setInterval(() => refreshCharacterDirectory().catch(() => {}), 10000);
     document.addEventListener('visibilitychange', pollEvents);
     pollEvents();
 }
