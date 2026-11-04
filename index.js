@@ -183,6 +183,7 @@ async function setMode(mode) {
 
 async function startScene() {
     if (settings().scene) throw new Error('先结束当前线下剧情，再开始新的一场。');
+    if (context.groupId != null) throw new Error('当前桥接只支持酒馆单角色聊天；请先打开对应角色的私聊，再开始线下剧情。');
     const characterKey = activeUvuKey();
     if (!characterKey) throw new Error('先从角色下拉列表选择对应的 UvU 角色。');
     if (!settings().uvuCharacters?.some(character => character.id === characterKey)) throw new Error('当前绑定 ID 不在 UvU 角色目录中。请先在 UvU 连接页重新配对或刷新角色列表，再选择正确角色。');
