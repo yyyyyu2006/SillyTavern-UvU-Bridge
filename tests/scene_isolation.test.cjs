@@ -10,7 +10,8 @@ function fixture(fetchImpl) {
         document: { readyState: 'loading', visibilityState: 'visible', addEventListener() {} }, console, structuredClone, AbortController, AbortSignal,
         setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, fetch: fetchImpl || (async () => ({ ok: true, json: async () => ({ token: 'csrf', enabled: true }) })) });
     const source = fs.readFileSync(require.resolve('../index.js'), 'utf8').split('\n').filter(line => !line.startsWith('import ')).join('\n');
-    vm.runInContext(source + '\ncontext=getContext(); globalThis.api={settings,updatePrompt,memoryPrompt,pollEvents,applyEnabled,invalidateRequests,request};', sandbox);
+    vm.runInContext(fs.readFileSync(require.resolve('../story-text.js'), 'utf8'), sandbox);
+    vm.runInContext(source + '\ncontext=getContext(); globalThis.api={settings,updatePrompt,memoryPrompt,pollEvents,applyEnabled,invalidateRequests,request,reviewDraft,deleteReceivedItems,saveReview};', sandbox);
     const settings = sandbox.api.settings();
     Object.assign(settings, { bridgeEnabled: true, injectMemory: true, characterLinks: { 'character:card.png': 'uvu-a' },
         cursorByCharacter: {}, packetsByCharacter: { 'uvu-a': { mode: 'offline', sceneId: 'scene-a', sourceArchiveId: 'archive-a', items: [
@@ -26,6 +27,39 @@ test('only this extension prompt is written and only for the exact scene/chat/ar
     f.context.chatId = 'another-chat-same-card'; f.api.updatePrompt(); assert.equal(f.prompts.get('uvu-story-bridge-continuity'), '');
     f.context.chatId = 'chat-a'; f.settings.scene.uvuArchiveId = 'archive-b'; f.api.updatePrompt(); assert.equal(f.prompts.get('uvu-story-bridge-continuity'), '');
     assert.equal(f.prompts.get('another-extension'), 'UNCHANGED');
+});
+
+test('latest 50 draft checks do not inject until explicitly saved and survive polling', async () => {
+    const f=fixture(); const data=f.settings.packetsByCharacter['uvu-a'];
+    data.items=Array.from({length:55},(_,i)=>({eventId:'m'+i,archiveId:'archive-a',text:'正文'+i,selected:false}));
+    const draft=f.api.reviewDraft('uvu-a',data);
+    assert.equal(Object.values(draft).filter(i=>i.selected).length,50);
+    assert.equal(f.api.memoryPrompt('uvu-a'),'');
+    draft.m54.text='手动编辑'; draft.m54.selected=false; draft.m54.touched=true;
+    data.items.push({eventId:'new',archiveId:'archive-a',text:'新剧情',selected:false});
+    assert.equal(f.api.reviewDraft('uvu-a',structuredClone(data)).m54.text,'手动编辑');
+    await f.api.saveReview('uvu-a','archive-a');
+    assert.doesNotMatch(f.api.memoryPrompt('uvu-a'),/正文54|手动编辑/);
+    assert.match(f.api.memoryPrompt('uvu-a'),/正文53/);
+});
+
+test('deleted received copies disappear from injection, survive replay and leave other archives intact', async () => {
+    const f=fixture(async url=>({ok:true,json:async()=>url.includes('/ui/events?')?{events:[{seq:1,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'one',text:'REPLAY'}]}}]}:{mode:'offline',sceneId:'scene-a',enabled:true}}));
+    f.settings.packetsByCharacter['uvu-a'].items[0].eventId='archive-a:one';
+    await f.api.deleteReceivedItems('uvu-a','archive-a',['archive-a:one']);
+    assert.equal(f.api.memoryPrompt('uvu-a'),'');
+    await f.api.pollEvents();
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items.length,1);
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].archiveId,'archive-b');
+});
+
+test('updated message revision requires fresh review instead of retaining old approval', async () => {
+    const f=fixture(async url=>({ok:true,json:async()=>url.includes('/ui/events?')?{events:[{seq:1,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'one',revision:'new',text:'UPDATED'}]}}]}:{mode:'offline',sceneId:'scene-a',enabled:true}}));
+    f.settings.packetsByCharacter['uvu-a'].items[0].eventId='archive-a:one';
+    await f.api.pollEvents();
+    const items=f.settings.packetsByCharacter['uvu-a'].items;
+    assert.equal(items.length,2); assert.equal(items[0].text,'UPDATED'); assert.equal(items[0].selected,false);
+    assert.equal(f.api.memoryPrompt('uvu-a'),'');
 });
 test('master switch immediately clears prompt and preserves suspended scene without automatic resumption', async () => {
     const f = fixture(); f.api.updatePrompt();
@@ -51,4 +85,41 @@ test('service disable never reactivates offline mode on enable', async () => {
     await store.setEnabled(false); assert.equal(store.getMode('a').mode, 'online');
     await assert.rejects(store.setMode({ characterKey: 'a', mode: 'offline' }), /disabled/);
     await store.setEnabled(true); assert.equal(store.getMode('a').mode, 'online');
+});
+
+test('review save and received-copy deletion roll back on settings failure', async () => {
+    const f=fixture(), before=JSON.stringify(f.settings.packetsByCharacter['uvu-a']);
+    f.context.saveSettingsDebounced=async()=>{throw new Error('quota');};
+    await assert.rejects(f.api.deleteReceivedItems('uvu-a','archive-a',['one']),/quota/);
+    assert.equal(JSON.stringify(f.settings.packetsByCharacter['uvu-a']),before);
+    const draft=f.api.reviewDraft('uvu-a',f.settings.packetsByCharacter['uvu-a']);
+    draft.one.text='UNSAVED'; draft.one.touched=true;
+    await assert.rejects(f.api.saveReview('uvu-a','archive-a'),/quota/);
+    assert.equal(JSON.stringify(f.settings.packetsByCharacter['uvu-a']),before);
+    assert.doesNotMatch(f.api.memoryPrompt('uvu-a'),/UNSAVED/);
+});
+
+test('manual refresh reports counts and rejects disabled or unbound requests', async () => {
+    const f=fixture(async()=>({ok:true,json:async()=>({events:[],mode:'offline',sceneId:'scene-a',enabled:true})}));
+    const result=await f.api.pollEvents({manual:true});
+    assert.equal(result.received,0); assert.equal(result.total,1);
+    f.settings.bridgeEnabled=false;
+    await assert.rejects(f.api.pollEvents({manual:true}),/启用/);
+});
+
+test('editing legacy received text retains its original source for unchanged retransfers', async () => {
+    const f=fixture(async url=>({ok:true,json:async()=>url.includes('/ui/events?')?{events:[{seq:1,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'one',text:'SAVED_MEMORY'}]}}]}:{mode:'offline',sceneId:'scene-a',enabled:true}}));
+    const data=f.settings.packetsByCharacter['uvu-a']; data.items[0].eventId='archive-a:one';
+    const draft=f.api.reviewDraft('uvu-a',data); draft['archive-a:one'].text='REVIEW_EDIT'; draft['archive-a:one'].touched=true;
+    await f.api.saveReview('uvu-a','archive-a'); await f.api.pollEvents();
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].text,'REVIEW_EDIT');
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].selected,true);
+});
+
+test('an acknowledgement failure cannot leave an obsolete approved prompt injected', async () => {
+    const f=fixture(async url=>({ok:!url.endsWith('/ui/ack'),status:500,json:async()=>url.endsWith('/csrf-token')?{token:'csrf'}:url.includes('/ui/events?')?{events:[{seq:1,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'one',text:'UPDATED'}]}}]}:{mode:'offline',sceneId:'scene-a',enabled:true}}));
+    f.settings.packetsByCharacter['uvu-a'].items[0].eventId='archive-a:one';
+    f.api.updatePrompt(); assert.match(f.prompts.get('uvu-story-bridge-continuity'),/SAVED_MEMORY/);
+    await f.api.pollEvents();
+    assert.equal(f.prompts.get('uvu-story-bridge-continuity'),'');
 });

@@ -5,7 +5,7 @@ import { extension_prompt_types } from '../../../../script.js';
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const EXTENSION_VERSION = '0.3.0';
+const EXTENSION_VERSION = '0.3.1';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
@@ -16,6 +16,8 @@ let pollBusy = false;
 let directoryRefreshBusy = false;
 let sceneBusy = false;
 let actionBusy = false;
+let reviewMutationBusy = false;
+const reviewDrafts = new Map();
 let generation = 0;
 const requests = new Set();
 
@@ -197,9 +199,11 @@ function updatePrompt() {
     context.setExtensionPrompt(`${EXTENSION_ID}-continuity`, prompt, extension_prompt_types.IN_PROMPT, 0);
 }
 
-async function pollEvents() {
+async function pollEvents(options = {}) {
     context = getContext();
-    if (settings().bridgeEnabled === false || pollBusy || document.visibilityState !== 'visible' || !activeUvuKey()) return;
+    if (settings().bridgeEnabled === false || !activeUvuKey()) { if (options.manual) throw new Error('请启用插件并绑定当前 UvU 角色。'); return; }
+    if (pollBusy || reviewMutationBusy) { if (options.manual) throw new Error('同步或保存正在进行，请稍候再刷新。'); return; }
+    if (document.visibilityState !== 'visible') return;
     pollBusy = true;
     const key = activeUvuKey();
     const epoch = generation, identity = chatIdentity();
@@ -221,7 +225,7 @@ async function pollEvents() {
         const previous = settings().packetsByCharacter[key] || { mode: 'online', items: [] };
         const next = structuredClone(previous), items = next.items || [];
         next.pendingMessageParts = next.pendingMessageParts || {};
-        const ids = new Set(items.map(item => item.eventId));
+        const deleted = new Set(next.deletedEventIds || []);
         let nextCursor = cursor, received = 0;
         for (const event of result.events || []) {
             nextCursor = Math.max(nextCursor, Number(event.seq) || 0);
@@ -231,17 +235,20 @@ async function pollEvents() {
             for (const record of records) {
                 const sourceId = String(record.sourceMessageId || record.id || event.eventId);
                 const id = payload.archiveId ? payload.archiveId + ':' + sourceId : sourceId;
-                if (ids.has(id)) continue;
+                if (deleted.has(id)) continue;
                 const hasParts = record.messagePart !== undefined || record.messagePartCount !== undefined;
                 const complete = hasParts
-                    ? globalThis.UvUBridgeText.addMessagePart(next.pendingMessageParts, id, record)
+                    ? globalThis.UvUBridgeText.addMessagePart(next.pendingMessageParts, id + ':' + String(record.revision || 'legacy'), record)
                     : { text: record.text, createdAt: record.createdAt };
                 if (!complete) continue;
                 const text = globalThis.UvUBridgeText.clean(complete.text);
                 if (!text) continue;
-                ids.add(id); received++;
-                items.push({ eventId: id, title: String(payload.title || 'UvU 线上剧情').slice(0, 160), text,
-                    createdAt: Number(complete.createdAt) || Number(record.createdAt) || event.createdAt, archiveId: payload.archiveId || '', selected: false });
+                const existing = items.find(item => item.eventId === id);
+                if (existing && (existing.sourceText || existing.text) === text) continue;
+                received++;
+                const item = { eventId: id, title: String(payload.title || 'UvU 线上剧情').slice(0, 160), text, sourceText: text,
+                    createdAt: Number(complete.createdAt) || Number(record.createdAt) || event.createdAt, archiveId: payload.archiveId || '', selected: false, reviewed: false };
+                if (existing) Object.assign(existing, item); else items.push(item);
             }
             if (payload.archiveId && !next.sourceArchiveId) next.sourceArchiveId = payload.archiveId;
         }
@@ -252,13 +259,69 @@ async function pollEvents() {
         if ((result.events || []).length || previous.mode !== mode.mode || previous.sceneId !== mode.sceneId || previous.enabled !== mode.enabled) {
             settings().packetsByCharacter[key] = next;
             settings().cursorByCharacter[key] = nextCursor;
-            await context.saveSettingsDebounced();
+            try { await context.saveSettingsDebounced(); }
+            catch (error) { settings().packetsByCharacter[key] = previous; settings().cursorByCharacter[key] = cursor; throw error; }
         }
-        if (nextCursor > cursor) await request('/ui/ack', { method: 'POST', body: { seq: nextCursor, characterKey: key } });
         updatePrompt(); renderOnlineReview();
+        if (nextCursor > cursor) await request('/ui/ack', { method: 'POST', body: { seq: nextCursor, characterKey: key } });
         if (received) showStatus('收到 ' + received + ' 条在线剧情，请在下方审核勾选后应用。');
-    } catch (error) { showStatus(error.message, true); }
+        return { received, total: items.filter(item => (item.archiveId || '') === (next.sourceArchiveId || '')).length };
+    } catch (error) { if (options.manual) throw error; showStatus(error.message, true); }
     finally { pollBusy = false; }
+}
+
+function reviewDraft(key, data) {
+    const draftKey = activeStKey() + ':' + key;
+    const draft = reviewDrafts.get(draftKey) || {};
+    reviewDrafts.set(draftKey, draft);
+    const ordered = (data.items || []).filter(item => (item.archiveId || '') === (data.sourceArchiveId || '')).slice().sort((a, b) => (Number(a.createdAt) || 0) - (Number(b.createdAt) || 0));
+    const recent = new Set(ordered.slice(-50).map(item => item.eventId));
+    for (const item of data.items || []) {
+        const sourceText = item.sourceText || item.text;
+        if (!draft[item.eventId] || draft[item.eventId].sourceText !== sourceText) draft[item.eventId] = {
+            text: item.text, sourceText, selected: item.reviewed || item.selected ? item.selected === true : recent.has(item.eventId), touched: false
+        };
+        else if (!draft[item.eventId].touched && !item.reviewed && !item.selected) draft[item.eventId].selected = recent.has(item.eventId);
+    }
+    for (const id of Object.keys(draft)) if (!(data.items || []).some(item => item.eventId === id)) delete draft[id];
+    return draft;
+}
+
+async function saveReview(key, archiveId) {
+    if (activeUvuKey() !== key) throw new Error('角色已切换，请返回原角色审核。');
+    if (pollBusy || reviewMutationBusy) throw new Error('正在同步或保存，请稍候重试。');
+    const data = settings().packetsByCharacter[key];
+    if (!data || (data.sourceArchiveId || '') !== archiveId) throw new Error('来源存档已切换，请重新审核。');
+    const previous = structuredClone(data), draft = reviewDraft(key, data);
+    reviewMutationBusy = true;
+    try {
+        for (const item of data.items) if ((item.archiveId || '') === archiveId) {
+            item.sourceText = item.sourceText || item.text;
+            item.selected = draft[item.eventId].selected; item.text = globalThis.UvUBridgeText.clean(draft[item.eventId].text); item.reviewed = true;
+        }
+        await context.saveSettingsDebounced();
+        updatePrompt(); renderOnlineReview();
+    } catch (error) { settings().packetsByCharacter[key] = previous; throw error; }
+    finally { reviewMutationBusy = false; }
+}
+
+async function deleteReceivedItems(key, archiveId, eventIds) {
+    if (activeUvuKey() !== key) throw new Error('角色已切换，未删除。');
+    if (pollBusy || reviewMutationBusy) throw new Error('正在同步或保存，请稍候重试。');
+    const data = settings().packetsByCharacter[key];
+    if (!data || (data.sourceArchiveId || '') !== archiveId) throw new Error('来源存档已切换，未删除。');
+    const previous = structuredClone(data), ids = new Set(eventIds);
+    const removed = data.items.filter(item => (item.archiveId || '') === archiveId && ids.has(item.eventId));
+    if (!removed.length) return;
+    reviewMutationBusy = true;
+    try {
+        data.deletedEventIds = [...new Set([...(data.deletedEventIds || []), ...removed.map(item => item.eventId)])];
+        data.items = data.items.filter(item => !removed.includes(item));
+        await context.saveSettingsDebounced();
+        updatePrompt(); renderOnlineReview();
+        showStatus('已删除 ' + removed.length + ' 条酒馆接收副本；原始聊天保留，刷新不会恢复这些副本。');
+    } catch (error) { settings().packetsByCharacter[key] = previous; throw error; }
+    finally { reviewMutationBusy = false; }
 }
 
 function renderOnlineReview() {
@@ -270,34 +333,62 @@ function renderOnlineReview() {
     host.dataset.signature = signature;
     host.replaceChildren();
     if (!data.items?.length) { host.textContent = '尚未收到在线剧情。请先在 UvU 交接所需聊天范围。'; return; }
+    const draft = reviewDraft(key, data);
     const label = document.createElement('label'); label.textContent = '本场使用的 UvU 存档';
     const select = document.createElement('select');
     for (const id of [...new Set(data.items.map(item => item.archiveId || ''))]) select.add(new Option(id || '旧版未标注存档', id));
     select.value = data.sourceArchiveId || '';
-    select.addEventListener('change', async () => { if (settings().scene?.characterKey === key) { select.value = data.sourceArchiveId || ''; return showStatus('本场来源存档已锁定，请结束本场后切换。', true); } data.sourceArchiveId = select.value; await context.saveSettingsDebounced(); updatePrompt(); renderOnlineReview(); });
+    select.addEventListener('change', async () => {
+        const current = settings().packetsByCharacter[key];
+        if (activeUvuKey() !== key || !current) return;
+        if (pollBusy || reviewMutationBusy || settings().scene?.characterKey === key) { select.value = current.sourceArchiveId || ''; return showStatus('正在同步，或本场来源存档已锁定；请稍候或结束本场再切换。', true); }
+        const previous = current.sourceArchiveId;
+        reviewMutationBusy = true;
+        try { current.sourceArchiveId = select.value; await context.saveSettingsDebounced(); updatePrompt(); renderOnlineReview(); }
+        catch (error) { current.sourceArchiveId = previous; select.value = previous || ''; showStatus('切换存档失败：' + error.message, true); }
+        finally { reviewMutationBusy = false; }
+    });
     label.append(select); host.append(label);
     const list = document.createElement('div'); list.className = 'uvu-bridge-review-list';
     data.items.forEach(item => {
         if ((item.archiveId || '') !== (data.sourceArchiveId || '')) return;
         const row = document.createElement('details'), title = document.createElement('summary');
-        const check = document.createElement('input'); check.type = 'checkbox'; check.checked = item.selected === true;
+        const check = document.createElement('input'); check.type = 'checkbox'; check.checked = draft[item.eventId].selected;
+        check.addEventListener('change', () => { draft[item.eventId].selected = check.checked; draft[item.eventId].touched = true; });
         check.dataset.item = item.eventId;
         check.addEventListener('click', event => event.stopPropagation());
         title.append(check, document.createTextNode(item.text.slice(0, 65)));
-        const text = document.createElement('textarea'); text.value = item.text; text.dataset.itemText = item.eventId;
+        const text = document.createElement('textarea'); text.value = draft[item.eventId].text; text.dataset.itemText = item.eventId;
+        text.addEventListener('input', () => { draft[item.eventId].text = text.value; draft[item.eventId].touched = true; });
         const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '删除这条';
-        remove.addEventListener('click', async () => { data.items = data.items.filter(entry => entry !== item); await context.saveSettingsDebounced(); updatePrompt(); renderOnlineReview(); });
+        remove.addEventListener('click', async () => {
+            if (!confirm('删除这条酒馆接收副本？UvU 原消息和酒馆聊天保留。')) return;
+            remove.disabled = true;
+            try { await deleteReceivedItems(key, data.sourceArchiveId || '', [item.eventId]); } catch (error) { showStatus('删除失败：' + error.message, true); }
+            finally { remove.disabled = false; }
+        });
         row.append(title, text, remove); list.append(row);
     });
     const save = document.createElement('button'); save.type = 'button'; save.textContent = '保存勾选与编辑';
     save.addEventListener('click', async () => {
-        if (activeUvuKey() !== key) return;
-        host.querySelectorAll('[data-item]').forEach(check => { const item = data.items.find(entry => entry.eventId === check.dataset.item); if (item) item.selected = check.checked; });
-        host.querySelectorAll('[data-item-text]').forEach(text => { const item = data.items.find(entry => entry.eventId === text.dataset.itemText); if (item) item.text = globalThis.UvUBridgeText.clean(text.value); });
-        await context.saveSettingsDebounced(); updatePrompt(); renderOnlineReview();
+        save.disabled = true;
+        try { await saveReview(key, data.sourceArchiveId || ''); } catch (error) { showStatus('审核保存失败：' + error.message, true); return; } finally { save.disabled = false; }
         showStatus('审核已保存到本插件的线上记忆清单，未写入 UvU 日记。开启注入后仅本场原角色、原聊天、原存档生效；预算 12000 字符，优先最近完整条目。');
     });
-    host.append(list, save);
+    const count = document.createElement('p'); count.className = 'uvu-bridge-help';
+    const archiveItems = data.items.filter(item => (item.archiveId || '') === (data.sourceArchiveId || ''));
+    count.textContent = `本存档已接收 ${archiveItems.length} 条；未审核条目默认预选最近 50 条，编辑和勾选必须保存才会应用。`;
+    const removeSelected = document.createElement('button'); removeSelected.type = 'button'; removeSelected.textContent = '删除勾选副本';
+    removeSelected.addEventListener('click', async () => {
+        const ids = archiveItems.filter(item => draft[item.eventId]?.selected).map(item => item.eventId);
+        if (!ids.length) return showStatus('请先勾选要删除的接收副本。', true);
+        if (!confirm(`删除当前来源存档中勾选的 ${ids.length} 条接收副本？两边原始聊天保留，刷新不会恢复这些副本。`)) return;
+        removeSelected.disabled = true;
+        try { await deleteReceivedItems(key, data.sourceArchiveId || '', ids); } catch (error) { showStatus('删除失败：' + error.message, true); }
+        finally { removeSelected.disabled = false; }
+    });
+    const actions = document.createElement('div'); actions.className = 'uvu-bridge-row'; actions.append(save, removeSelected);
+    host.append(count, list, actions);
     const preview = document.createElement('details'), heading = document.createElement('summary'), text = document.createElement('pre');
     heading.textContent = '查看可注入正文（最多 12000 字符；超预算整条跳过）'; text.textContent = memoryPrompt(key) || '未开启注入，或没有已勾选条目。';
     preview.append(heading, text); host.append(preview);
@@ -465,7 +556,7 @@ function renderPanel() {
         <div class="inline-drawer-content">
           <div class="uvu-bridge-fields">
           <label class="uvu-bridge-check"><input type="checkbox" data-bridge-enabled> 启用酒馆互通插件（总开关）</label>
-          <p data-version>扩展 0.3.0 · 服务端待检查</p><button type="button" data-action="check-version">检查版本 / 更新</button>
+          <p data-version>扩展 0.3.1 · 服务端待检查</p><button type="button" data-action="check-version">检查版本 / 更新</button>
           <p data-bridge-status role="status">等待本机桥接服务</p>
           <p class="uvu-bridge-identity" data-current-identity>正在读取角色...</p>
           <label>绑定到 UvU 角色<select data-uvu-character autocomplete="off"><option value="">先从 UvU 同步角色目录</option></select></label>
@@ -485,13 +576,13 @@ function renderPanel() {
           </div>
           <label>额外排除标签（逗号分隔，如 status_box）<input type="text" data-exclude-tags placeholder="只影响导出副本"></label>
           <button type="button" data-action="cancel-scene">结束空场 / 放弃本场导出</button>
-          <details><summary>UvU → 酒馆：线上记忆审核</summary><div data-online-review></div></details>
+          <details><summary>UvU → 酒馆：线上记忆审核</summary><button type="button" data-action="refresh-online">刷新线上存档</button><p class="uvu-bridge-help">读取 UvU 已交接的最新副本，不会直接读取未发送的聊天。新内容须审核保存后才可注入。</p><div data-online-review></div></details>
           <p class="uvu-bridge-help">角色目录由已配对的 UvU 页面提供。开始前请核对酒馆角色、UvU 角色名与 ID；绑定、聊天、来源存档在本场锁定。切换聊天不会把场景记忆带给其他角色。</p>
           <details><summary>具体操作教程与功能说明</summary>
             <p>按钮说明：“刷新 UvU 角色”只读取目录；“生成配对码”生成五分钟有效的六位码；“开始线下剧情”锁定角色、聊天和来源存档并记录起点；“继续本场”恢复暂停的原场景；“拿出手机”允许 UvU 回复；“收起手机”让剧情继续留在酒馆；“结束并导出”发送剧情副本给 UvU 审核；“结束空场 / 放弃本场导出”恢复线上并撤回未审核草稿。两边不会自动复制人设或互相调用回复 API。</p>
             <ol><li><strong>先配对设备：</strong>打开 UvU“设置 → 酒馆互通”，保持本页在前台；在本扩展点“生成配对码”，把 6 位码填入 UvU 并点“连接 / 配对”。首次连接按浏览器提示允许访问本机网络；状态变成“已配对”才算完成。</li>
             <li><strong>核对角色：</strong>在酒馆打开目标角色的私聊，不要停留在群聊；从“绑定到 UvU 角色”选择对应角色，检查面板显示的酒馆角色名和 UvU 角色名/ID。人设、用户设定和头像不会自动复制，两边仍各自维护。</li>
-            <li><strong>把线上背景交给酒馆：</strong>在 UvU“酒馆互通”选角色、当前存档及消息起止编号，点“交接所选范围”。消息编号从 1 开始；回酒馆展开“收到的线上剧情”，在存档下拉框选来源存档，再展开每条记录核对、编辑或勾选，最后点“保存勾选与编辑”。未保存或未勾选内容不会被使用。</li>
+            <li><strong>把线上背景交给酒馆：</strong>在 UvU“酒馆互通”选角色、当前存档及消息起止编号，点“交接所选范围”。消息编号从 1 开始；默认取最近 50 条有效正文，也可自选编号。回酒馆展开“线上记忆审核”并点“刷新线上存档”，在存档下拉框选来源存档，再展开每条记录核对、编辑或勾选，最后点“保存勾选与编辑”。刷新只读取已经交接的副本，不读取 UvU 尚未发送的聊天；新内容默认预选最近 50 条，未保存不注入，已审核的选择保留。原文更新后须重新审核。展开记录可“删除这条”，或点“删除勾选副本”；仅删除接收副本，刷新不会恢复，两边原聊天保留。</li>
             <li><strong>开启记忆：</strong>勾选“在线记忆加入酒馆线下上下文”。仅当前绑定角色、当前来源存档中已勾选的记录可进入线下/手机模式的扩展记忆；取消勾选会暂停注入，但保留已审核记录。</li>
             <li><strong>开始线下剧情：</strong>确认仍在正确的酒馆私聊，点“开始线下剧情”，再回聊天框手动输入开场并发送。按钮只切换模式、记录起点，不会自动跳转角色或生成消息。</li>
             <li><strong>临时使用手机：</strong>线下剧情中点“拿出手机”，UvU 用自己的 API 正常回复；点“收起手机”后，后续剧情继续留在酒馆。酒馆旁白不会自动变成 UvU 消息，需要明确拿出手机并在 UvU 聊天。</li>
@@ -548,6 +639,10 @@ function renderPanel() {
         try {
             if (sceneBusy) throw new Error('当前剧情操作尚未完成，请稍候。');
             if (action === 'check-version') await checkVersion();
+            if (action === 'refresh-online') {
+                const result = await pollEvents({ manual: true });
+                if (result) showStatus(`刷新完成：新增或更新 ${result.received} 条；当前来源存档共 ${result.total} 条。待审勾选与编辑已保留，请核对后保存。若缺少最新消息，请先在 UvU 重新交接。`);
+            }
             if (action === 'resume-scene') { const scene = settings().scene; sceneIdentity(scene); if (settings().bridgeEnabled === false) throw new Error('请先启用总开关'); await setSceneMode('offline', scene); scene.suspended = false; await context.saveSettingsDebounced(); updatePrompt(); showStatus('已继续原场景。'); }
             if (action === 'cancel-scene') { const scene = settings().scene; if (!scene) throw new Error('当前没有进行中的线下剧情。'); if (!confirm('结束本场并恢复线上？原聊天保留，未审核的导出草稿将撤回。')) return; await request('/ui/events', { method: 'POST', body: { source: 'sillytavern', eventId: scene.id + ':cancel', kind: 'scene_cancelled', characterKey: scene.characterKey, sceneId: scene.id, payload: {} } }); await setSceneMode('online', scene); settings().scene = null; await context.saveSettingsDebounced(); showStatus('本场已结束，原聊天保留。'); }
             if (action === 'refresh-characters') {
@@ -570,7 +665,7 @@ function renderPanel() {
         } catch (error) { showStatus(`${button.textContent.trim()}失败：${error.message}`, true); }
         finally { actionBusy = false; button.disabled = false; }
     });
-    const help = { 'refresh-characters': '读取已配对 UvU 的角色目录，不复制人设', pair: '生成五分钟内有效的一次性码', 'start-scene': '锁定当前角色、聊天、来源存档并记录起点；手动发送开场', 'resume-scene': '总开关重开后恢复原场景，须回原聊天', 'phone-mode': '允许本场角色在 UvU 用自己的 API 回复', 'close-phone': '关闭 UvU 手机通道，剧情继续在酒馆', 'end-scene': '过滤并导出本场剧情，回 UvU 审核后加入日记', 'cancel-scene': '恢复线上、撤回未审核草稿，保留原聊天', 'check-version': '检查扩展、服务端和公开仓库版本，不自动安装' };
+    const help = { 'refresh-online': '读取已交接的线上副本，保留待审编辑；核对后须保存才可注入', 'refresh-characters': '读取已配对 UvU 的角色目录，不复制人设', pair: '生成五分钟内有效的一次性码', 'start-scene': '锁定当前角色、聊天、来源存档并记录起点；手动发送开场', 'resume-scene': '总开关重开后恢复原场景，须回原聊天', 'phone-mode': '允许本场角色在 UvU 用自己的 API 回复', 'close-phone': '关闭 UvU 手机通道，剧情继续在酒馆', 'end-scene': '过滤并导出本场剧情，回 UvU 审核后加入日记', 'cancel-scene': '恢复线上、撤回未审核草稿，保留原聊天', 'check-version': '检查扩展、服务端和公开仓库版本，不自动安装' };
     for (const button of panel.querySelectorAll('[data-action]')) button.title = help[button.dataset.action] || '';
     return true;
 }

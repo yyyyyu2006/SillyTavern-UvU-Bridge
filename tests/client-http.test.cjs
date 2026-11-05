@@ -56,7 +56,7 @@ test('loopback client API handles preflight and pairing without disabling Tavern
     await store.setEnabled(false);
     const service = await fetch(`${baseUrl}/v1/client/service`, { headers: { Origin: origin, Authorization: `Bearer ${token}` } });
     const info = await service.json();
-    assert.equal(info.enabled, false); assert.equal(info.version, '0.3.0'); assert.equal(info.protocolVersion, 1);
+    assert.equal(info.enabled, false); assert.equal(info.version, require('../manifest.json').version); assert.equal(info.protocolVersion, 1);
     const disabledMode = await fetch(`${baseUrl}/v1/client/state?characterKey=char-1`, { headers: { Origin: origin, Authorization: `Bearer ${token}` } });
     assert.equal((await disabledMode.json()).mode, 'online');
     const inbox = await fetch(`${baseUrl}/v1/client/inbox`, { headers: { Origin: origin, Authorization: `Bearer ${token}` } });
