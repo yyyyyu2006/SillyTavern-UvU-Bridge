@@ -60,6 +60,10 @@ Service, inbox and event-list responses include a persistent `relayId`. A change
 
 `GET /ui/extension-state` and `PUT /ui/extension-state {revision,settings}` are same-origin Tavern routes using its CSRF/authenticated account. They are not exposed on the client listener. PUT rejects stale revisions with 409. Extension state is atomically stored separately from the relay queue, so individual events do not clone the full review library. A failed or uncertain save is not acknowledged as received.
 
+## 0.4.2 additive floor metadata
+
+New scene parts add sceneFormat "floors-v1" and floor fields {id,number,speaker,role,createdAt,extraction,bodyTag,part,partCount}. The outer part/partCount spans the whole scene; floor.part/floor.partCount spans one original message. All chunks for a floor carry the same identity and are contiguous. Text chunks concatenate without separators within a floor. The receiver validates consistent format/identity/order and reconstructs all floors before saving or acknowledging a complete journal. Metadata is additive and the original text/checksum transport remains readable to older clients, though whole-floor review requires updated UvU. Old frozen parts and old scenes without metadata retain legacy reception.
+
 ## 0.4.1 pairing and device credentials
 
 Pairing accepts `{code,device?:{name}}` and returns `{token,paired:true,device}` on both client transports. Old callers may ignore additive metadata. Permanent codes are 24 random bytes encoded as 32 base64url characters, hashed at rest and reusable until rotation. One-time codes remain single-use with five-minute TTL, and each successful pair creates a distinct credential. Legacy tokenHash continues to authorize and is listed as legacy.

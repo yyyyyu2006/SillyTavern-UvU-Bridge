@@ -13,6 +13,18 @@ function event(source, eventId, overrides = {}) {
         payload: { text: 'A promise made during the previous scene.' }, ...overrides };
 }
 
+test('invalid new scene floor metadata is rejected before entering the relay', async () => {
+    const store = createBridgeStore();
+    const payload = {text: '正文', part: 1, partCount: 1, sceneFormat: 'floors-v1', floor: {id: 'f', number: 1, speaker: 'A',
+        role: 'assistant', createdAt: 1, extraction: 'tagged', bodyTag: 'content', part: 1, partCount: 1}};
+    for (const field of [{number: 0}, {part: 2}, {role: 'system'}, {speaker: null}, {createdAt: 8640000000000001}]) {
+        await assert.rejects(store.appendEvent(event('sillytavern', 'invalid-floor', {kind: 'scene_transcript', payload: {...payload, floor: {...payload.floor, ...field}}}), 'sillytavern'), /floor|楼层/i);
+    }
+    assert.equal(store.listEvents('uvu').events.length, 0);
+    await store.appendEvent(event('sillytavern', 'valid-floor', {kind: 'scene_transcript', payload}), 'sillytavern');
+    assert.equal(store.listEvents('uvu').events.length, 1);
+});
+
 test('pair code is single-use, expires, and bearer tokens can be revoked', async () => {
     let now = 1000;
     const store = createBridgeStore({ now: () => now, pairTtlMs: 100 });
@@ -93,7 +105,7 @@ test('event history is filtered by linked character and reports dropped records 
 
 test('events, cursors, and modes survive a local restart', async t => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'uvu-bridge-'));
-    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    t.after(() => fs.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
     const filePath = path.join(directory, 'data.json');
     const first = createBridgeStore({ filePath });
     await first.load();
@@ -117,7 +129,7 @@ test('UvU character directory is validated, persisted, and returned without extr
 
 test('failed persistence rolls back the in-memory event so retry is not mistaken for success', async t => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'uvu-bridge-fail-'));
-    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    t.after(() => fs.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
     const blockedParent = path.join(directory, 'not-a-directory');
     await fs.writeFile(blockedParent, 'occupied');
     const store = createBridgeStore({ filePath: path.join(blockedParent, 'state.json') });
@@ -128,7 +140,7 @@ test('failed persistence rolls back the in-memory event so retry is not mistaken
 
 test('repeated enabling preserves active scene and relay epoch survives restart', async t => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'uvu-epoch-'));
-    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    t.after(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }));
     const filePath = path.join(dir, 'state.json'), store = createBridgeStore({filePath});
     await store.setMode({characterKey:'a',mode:'offline',sceneId:'scene'});
     await store.setEnabled(true);
@@ -148,7 +160,7 @@ test('malformed nested message records are rejected without poisoning queue',asy
 
 test('readers cannot observe a draft before its disk write commits',async t=>{
     const dir=await fs.mkdtemp(path.join(os.tmpdir(),'uvu-atomic-'));
-    t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+    t.after(()=>fs.rm(dir,{recursive:true,force:true,maxRetries:3,retryDelay:100}));
     const store=createBridgeStore({filePath:path.join(dir,'s.json')});
     const original=fs.writeFile; let release,started;
     const ready=new Promise(r=>started=r);
@@ -173,7 +185,7 @@ test('extension state is isolated by Tavern account and revision checked',async(
 
 test('account review storage survives restart and failed writes retain the last confirmed revision',async t=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'uvu-ui-state-'));
- t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ t.after(()=>fs.rm(dir,{recursive:true,force:true,maxRetries:3,retryDelay:100}));
  const filePath=path.join(dir,'state.json'),store=createBridgeStore({filePath});
  await store.putUiState('alice',{revision:0,settings:{scene:{id:'a'},deleted:['archive:m']}});
  const restored=createBridgeStore({filePath});await restored.load();

@@ -40,6 +40,16 @@ function validateEvent(input, source) {
     if (kind === 'scene_transcript') {
         const { part, partCount, text } = input.payload;
         if (!Number.isInteger(part) || !Number.isInteger(partCount) || partCount < 1 || partCount > 2000 || part < 1 || part > partCount || typeof text !== 'string') throw new Error('Invalid scene parts');
+        if (input.payload.sceneFormat === 'floors-v1') {
+            const floor = input.payload.floor;
+            if (!floor || typeof floor.id !== 'string' || !floor.id || floor.id.length > 160 ||
+                !Number.isInteger(floor.number) || floor.number < 1 || !['user', 'assistant'].includes(floor.role) ||
+                typeof floor.speaker !== 'string' || floor.speaker.length > 120 ||
+                !Number.isFinite(floor.createdAt) || floor.createdAt < 0 || floor.createdAt > 8640000000000000 ||
+                !['plain', 'tagged'].includes(floor.extraction) || typeof floor.bodyTag !== 'string' || floor.bodyTag.length > 41 ||
+                !Number.isInteger(floor.part) || !Number.isInteger(floor.partCount) || floor.partCount < 1 || floor.partCount > 2000 ||
+                floor.part < 1 || floor.part > floor.partCount) throw new Error('Invalid scene floor');
+        }
         if (input.payload.partHash && input.payload.partHash !== digest(text)) throw new Error('Scene checksum mismatch');
     }
     const payload = JSON.stringify(input.payload);

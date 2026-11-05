@@ -25,6 +25,59 @@
         }).replace(/&(lt|gt|amp|quot|apos|nbsp);/gi, (_, n) => ({ lt: '<', gt: '>', amp: '&', quot: '"', apos: "'", nbsp: ' ' })[n.toLowerCase()]);
         return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     }
+    const BODY_TAGS = ['content', 'maintext', 'main_text', 'main-text', '正文', '正文内容', '正文部分', 'story', 'storytext', 'story_text', 'story-content', 'story_content', 'narrative', 'narration'];
+    function extractStory(value, {bodyTags = '', excludeTags = ''} = {}) {
+        let source = String(value || '').replace(/\r\n/g, '\n')
+            .replace(/<!--[\s\S]*?-->/g, '')
+            .replace(/\[\s*UIBOARD(?:\||\s)[^\]]*\]/gi, '')
+            .replace(/\x60{3}[^\n]*\n[\s\S]*?\x60{3}/g, '');
+        const names = text => String(text).split(/[,，\s]+/u)
+            .filter(tag => /^[a-z\u3400-\u9fff][a-z0-9_\-\u3400-\u9fff]{0,40}$/iu.test(tag))
+            .map(tag => tag.toLowerCase()).slice(0, 20);
+        const blocked = new Set(['think', 'thinking', 'analysis', 'reasoning', 'cot', 'status', 'statusbar', 'status_bar', 'status_panel', 'statusbox', 'status_box', 'uiboard', 'small_theater', 'smalltheater', 'mini_theater', 'theater', '小剧场', '状态栏', '状态', '思考', '思维链', 'script', 'style', 'iframe', 'object', 'svg', ...names(excludeTags)]);
+        const tokens = text => [...text.matchAll(/<\s*(\/?)\s*([a-z\u3400-\u9fff][a-z0-9_\-\u3400-\u9fff]*)(?:\s[^<>]*?)?\s*(\/?)>/giu)];
+        // Remove known side panels before looking for body wrappers inside them.
+        let cut = -1, depth = 0, container = '';
+        const ranges = [];
+        for (const token of tokens(source)) {
+            const name = token[2].toLowerCase(), closing = Boolean(token[1]);
+            if (cut < 0 && !closing) {
+                const sidePanel = name === 'details' && /^\s*<summary[^>]*>[^<]*(?:状态|思考|思维链|小剧场|番外|status|reasoning)/iu.test(source.slice(token.index + token[0].length));
+                const styledPanel = /(?:class|id)\s*=\s*["'][^"']*(?:status[_-]?(?:bar|panel|box)?|small[_-]?theater|状态栏|小剧场)/iu.test(token[0]);
+                if (blocked.has(name) || sidePanel || styledPanel) {
+                    cut = token.index; container = name; depth = 1;
+                    if (token[3]) { ranges.push([cut, token.index + token[0].length]); cut = -1; }
+                }
+            } else if (cut >= 0 && name === container) {
+                if (!closing && !token[3]) depth++;
+                else if (closing && --depth === 0) { ranges.push([cut, token.index + token[0].length]); cut = -1; }
+            }
+        }
+        if (cut >= 0) ranges.push([cut, source.length]);
+        for (let index = ranges.length - 1; index >= 0; index--) source = source.slice(0, ranges[index][0]) + source.slice(ranges[index][1]);
+        const custom = names(bodyTags), candidates = custom.length ? custom : BODY_TAGS;
+        for (const name of candidates) {
+            let nesting = 0, start = 0, seen = false, malformed = false;
+            const bodies = [];
+            for (const token of tokens(source)) {
+                if (token[2].toLowerCase() !== name) continue;
+                seen = true;
+                if (!token[1]) {
+                    if (token[3]) { malformed = true; continue; }
+                    if (nesting++ === 0) start = token.index + token[0].length;
+                } else if (nesting > 0) {
+                    if (--nesting === 0) bodies.push(source.slice(start, token.index));
+                } else malformed = true;
+            }
+            if (seen) {
+                if (nesting || malformed || !bodies.length) return {text: '', mode: 'malformed', tag: name};
+                return {text: clean(bodies.join('\n\n')), mode: 'tagged', tag: name};
+            }
+        }
+        source = source.replace(/^\s*\[UIBOARD[^\r\n]*$/gmi, '')
+            .replace(/^\s*(?:小剧场|番外剧场|状态栏)\s*[：:][\s\S]*$/mu, '');
+        return {text: clean(source), mode: 'plain', tag: ''};
+    }
     function segments(value) {
         return clean(value).split(/\n\s*\n/).map(text => text.trim()).filter(Boolean).map((text, index) => ({ id: String(index + 1), text, selected: false }));
     }
@@ -51,7 +104,7 @@
         delete pending[key];
         return { text, createdAt: entry.createdAt };
     }
-    const api = { clean, fingerprint, segments, addMessagePart };
+    const api = { clean, fingerprint, extractStory, BODY_TAGS, segments, addMessagePart };
     root.UvUBridgeText = api;
     if (typeof module !== 'undefined') module.exports = api;
 })(typeof globalThis === 'undefined' ? this : globalThis);

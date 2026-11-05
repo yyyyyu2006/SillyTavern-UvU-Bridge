@@ -88,3 +88,11 @@ Each pairing creates an independent device token; existing legacy tokens survive
 UvU stores its credential in the current browser, retries transient failures while visible with bounded backoff, and stops automatic retries after 401. Closing the page or restarting Tavern does not remove the binding. Clearing site data or deleting server data does. A changed bridge endpoint requires a fresh pairing and never receives the old credential. Browser suspension can delay retries. Multiple credentials share the local relay and directory; separate UvU databases are not merged.
 
 Update both extension and server to 0.4.1, restart Tavern normally and refresh both pages. Original prompt assembly and model-generation code are unchanged in this release.
+
+## 0.4.2 whole-floor story review
+
+Scene export retains one review item per original Tavern message floor, including speaker, source floor number and timestamp. Long floors split only for transport and are reconstructed before review. Explicit body wrappers take precedence over outside panels. Automatic aliases: content, maintext, main_text, main-text, 正文, 正文内容, 正文部分, story, storytext, story_text, story-content, story_content, narrative and narration. The first matched wrapper type wins. The panel's optional body-tag field overrides this list for custom presets; extra exclusions still apply. Arbitrary preset markup cannot be universally inferred. Untagged text remains for manual review with a warning. A recognized but malformed wrapper stops export.
+
+UvU offers per-scene select-all, partial selection, collapsed whole-floor rows and editable text. Saving puts only selected edited text into the existing diary/memory record, categorized as 酒馆线下剧情. Existing character/archive injection switches and vector opt-in still apply. No original chat, prompt or generation code is replaced.
+
+Legacy timestamp transcripts are regrouped by speaker/time boundaries; unstructured old text stays one manual-review record. Already imported unapproved paragraph reviews expose an explicit regroup action, which discards only unsaved review edits after confirmation. Approved records are never automatically rewritten; stripped legacy tags cannot be recovered. Frozen legacy exports retain their previous format for reliable retry. Update extension, server and UvU together to 0.4.2, restart the server and refresh both pages.

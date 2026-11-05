@@ -5,7 +5,7 @@ import { extension_prompt_types } from '../../../../script.js';
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const EXTENSION_VERSION = '0.4.1';
+const EXTENSION_VERSION = '0.4.2';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
@@ -141,6 +141,40 @@ function sceneText(messages) {
         const time = Number.isFinite(stamp) && stamp > 0 ? new Date(stamp).toISOString() : '时间未知';
         return '[' + time + ' | ' + (message.is_user ? context.name1 || 'User' : message.name || context.name2 || 'Character') + ']\n' + text;
     }).filter(Boolean).join('\n\n');
+}
+
+function sceneFloorParts(messages) {
+    context = getContext();
+    const result = [];
+    for (const [index, message] of messages.entries()) {
+        if (!message || message.is_system || message.is_hidden || message.is_thinking) continue;
+        const extracted = globalThis.UvUBridgeText.extractStory(message.mes, {bodyTags: settings().bodyTags || '', excludeTags: settings().excludeTags || ''});
+        if (extracted.mode === 'malformed') throw new Error('第 ' + (index + 1) + ' 层正文标签未正确闭合，请检查原文或自定义正文标签；未开始导出。');
+        if (!extracted.text) continue;
+        const raw = message.send_date || message.timestamp, stamp = raw ? (Number(raw) || Date.parse(raw)) : NaN;
+        const floor = {id: 'floor-' + index, number: context.chat.indexOf(message) + 1,
+            speaker: String(message.is_user ? context.name1 || 'User' : message.name || context.name2 || 'Character').slice(0, 120),
+            role: message.is_user ? 'user' : 'assistant', createdAt: Number.isFinite(stamp) && stamp > 0 && stamp <= 8640000000000000 ? stamp : 0,
+            extraction: extracted.mode, bodyTag: extracted.tag};
+        const chunks = [], encoder = new TextEncoder();
+        let points = [], bytes = 0;
+        for (const point of extracted.text) {
+            const size = encoder.encode(JSON.stringify(point)).length - 2;
+            if (points.length >= 8000 || bytes + size > 24000) {chunks.push(points.join('')); points = []; bytes = 0;}
+            points.push(point); bytes += size;
+        }
+        if (points.length) chunks.push(points.join(''));
+        for (const [part, text] of chunks.entries()) result.push({text,
+            sceneFormat: 'floors-v1', floor: {...floor, part: part + 1, partCount: chunks.length}});
+    }
+    if (result.length > 2000) throw new Error('本场导出超过 2000 个传输分段，请分场交接。');
+    return result;
+}
+
+function scenePartPayload(scene, item, index, count, messageEnd = scene.messageEnd) {
+    return {title: '酒馆线下剧情 ' + new Date(scene.startedAt).toLocaleDateString(), ...item,
+        part: index + 1, partCount: count, stCharacterKey: scene.stCharacterKey,
+        uvuArchiveId: scene.uvuArchiveId, messageStart: scene.startIndex, messageEnd};
 }
 
 async function checksum(text) {
@@ -691,11 +725,14 @@ async function endScene() {
     try {
     if (!scene.exportParts) {
         const messageEnd = context.chat.length;
-        const transcript = sceneText(sceneMessages(scene));
-        if (!transcript) throw new Error('本场没有有效剧情，可点“结束空场”恢复线上。');
-        const parts = splitSceneText(transcript);
+        const parts = sceneFloorParts(sceneMessages(scene));
+        if (!parts.length) throw new Error('本场没有有效剧情，可点“结束空场”恢复线上。');
         const frozen = [];
-        for (let i = 0; i < parts.length; i++) frozen.push({ text: parts[i], partHash: await checksum(parts[i]) });
+        for (const item of parts) frozen.push({...item, partHash: await checksum(item.text)});
+        for (const [index, item] of frozen.entries()) {
+            if (new TextEncoder().encode(JSON.stringify(scenePartPayload(scene, item, index, frozen.length, messageEnd))).length > 48 * 1024)
+                throw new Error('剧情片段与身份信息超过传输上限，尚未冻结或导出；请核对角色 / 存档信息。');
+        }
         sceneIdentity(scene);
         if (epoch !== generation || settings().bridgeEnabled === false) throw new Error('场景已改变，未开始导出。');
         scene.exportParts = frozen;
@@ -709,9 +746,7 @@ async function endScene() {
             await request('/ui/events', { method: 'POST', body: {
                 source: 'sillytavern', eventId: scene.id + ':transcript:' + (index + 1), kind: 'scene_transcript',
                 characterKey: scene.characterKey, sceneId: scene.id, createdAt: scene.startedAt,
-                payload: { title: '酒馆线下剧情 ' + new Date(scene.startedAt).toLocaleDateString(), ...item,
-                    part: index + 1, partCount: scene.exportParts.length, stCharacterKey: scene.stCharacterKey,
-                    uvuArchiveId: scene.uvuArchiveId, messageStart: scene.startIndex, messageEnd: scene.messageEnd }
+                payload: scenePartPayload(scene, item, index, scene.exportParts.length)
             } });
         }
         sceneIdentity(scene);
@@ -882,6 +917,7 @@ function renderPanel() {
             <button type="button" data-action="close-phone">收起手机</button>
             <button type="button" data-action="end-scene">结束并导出</button>
           </div>
+          <label>正文标签（留空自动识别；多个用逗号分隔）<input type="text" data-body-tags maxlength="800" placeholder="如 content、maintext、正文；填写时按顺序匹配"></label>
           <label>额外排除标签（逗号分隔，如 status_box）<input type="text" data-exclude-tags placeholder="只影响导出副本"></label>
           <button type="button" data-action="cancel-scene">结束空场 / 放弃本场导出</button>
           <details><summary>UvU → 酒馆：线上记忆审核</summary><button type="button" data-action="refresh-online">刷新线上存档</button><p class="uvu-bridge-help">读取 UvU 已交接的最新副本，不会直接读取未发送的聊天。新内容须审核保存后才可注入。</p><div data-online-review></div></details>
@@ -896,7 +932,8 @@ function renderPanel() {
             <li><strong>临时使用手机：</strong>线下剧情中点“拿出手机”，UvU 用自己的 API 正常回复；点“收起手机”后，后续剧情继续留在酒馆。酒馆旁白不会自动变成 UvU 消息，需要明确拿出手机并在 UvU 聊天。</li>
             <li><strong>导出并审核线下记忆：</strong>回到原酒馆聊天点“结束并导出”；在 UvU 点“收取酒馆记忆”，展开待审核剧情、查看过滤后的原文并逐条编辑/勾选后保存。只有审核通过且勾选的条目进入普通上下文或向量候选。导出中断时回原聊天重试，会继续发送同一份冻结内容。</li>
             <li><strong>暂停和结束：</strong>可以切换到其他酒馆角色或同一角色的其他聊天，本插件记忆会立即撤出；只有回到本场原聊天才会使用。取消总开关会停止请求、清除本插件注入，并通知服务端恢复 UvU 线上模式。原聊天和其他扩展的提示词不改动。重开后回原聊天点“继续本场”，不会自动恢复旧场景。</li>
-            <li><strong>两个审核方向：</strong>本页“线上记忆审核”保存的是 UvU 发来的剧情副本，供酒馆使用，不会加入 UvU 日记。酒馆 → UvU 请先“结束并导出”，再在 UvU“酒馆互通 → 酒馆线下剧情 → UvU 日记”收取、勾选、保存。仅勾选正文生效；过滤只作用于副本，原始聊天保留。</li>
+            <li><strong>两个审核方向：</strong>本页“线上记忆审核”保存的是 UvU 发来的剧情副本，供酒馆使用，不会加入 UvU 日记。酒馆 → UvU 请先“结束并导出”，再在 UvU“酒馆互通 → 酒馆线下剧情 → UvU 记忆”收取。新版每个酒馆楼层对应一条可折叠记录，长楼层分段传输后合并，支持整场全选和展开编辑。点“保存审核并加入记忆”后，只把所选文字写入对应角色 / 存档的回忆日记与记忆管理，沿用原来的记忆开关，未审核内容不注入；不改写原聊天和基础提示词。</li>
+            <li><strong>导出正文标签：</strong>留空会依次识别 content、maintext、main_text、main-text、正文、正文内容、正文部分、story、storytext、story_text、story-content、story_content、narrative、narration；取首个匹配类型中的完整正文，忽略外部文字。已知思考、状态栏、小剧场、UIBOARD 和代码块从副本中过滤。不同预设可以自定义任意标签，无法穷举；其他标签请填写“正文标签”，多个用逗号分隔，不带尖括号。未匹配正文标签的文字保留给人工审核并提示，默认不勾选；匹配标签未闭合会阻止导出。规则只影响尚未冻结的新导出，已经冻结的失败任务按原内容续传。旧待审核记录可在 UvU 手动重新整理，已丢失的标签无法恢复，已审核内容不自动重写。</li>
             <li><strong>版本更新：</strong>“检查版本”只读取公开版本号，不上传剧情，也不会自动安装。扩展在酒馆扩展管理中更新后刷新页面；服务端插件在 Termux 的 SillyTavern/plugins/uvu-story-bridge 目录执行 git pull，然后回启动酒馆的终端按 Ctrl+C 正常停止，再用原来的启动命令启动。不要仅大退 Termux。更新后再次检查扩展、服务端和协议版本。</li>
             <li><strong>可靠保存与恢复：</strong>本扩展的审核、删除标记和场景由本机服务按酒馆账户单独保存，服务端确认后才显示保存成功；多标签同时编辑会提示冲突，请保留待审编辑并刷新页面。普通刷新保留审核和删除标记；“恢复本存档已删除副本”须确认，仅恢复当前查看存档，恢复后重新审核。达到 500 条时先保留可容纳内容，删除不需要的接收副本后再刷新。已选正文最多注入 12000 字符，超长条目使用片段，下方可查看实际注入正文。剧情起点消息删除、修改或无法唯一定位时停止导出，避免错收；原聊天保留。旧场景如提示缺少可靠起点，先保留原聊天，放弃该场并重新记录起点。</li>
             <li><strong>报错与重试：</strong>401 表示配对码无效或设备凭证已解除；服务离线保留绑定，前台按间隔自动重连，401 后停止自动重试。换桥接地址需重新配对。可在设备列表单独解除，或确认“解除全部设备”；这两项保留聊天和永久码。403 检查来源白名单、回环地址或刷新 CSRF；404 更新服务端并重启；超时检查本机服务是否在运行。角色/存档不匹配请返回原聊天。导出分段失败可重试，已确认分段不会重复成为日记；放弃导出会发送取消标记，尚未审核的完整草稿也会被撤回。已审核日记保留，由 UvU 手动管理。</li></ol>
@@ -910,6 +947,13 @@ function renderPanel() {
     const exclude = panel.querySelector('[data-exclude-tags]');
     exclude.value = settings().excludeTags || '';
     exclude.addEventListener('change', () => configure(() => { exclude.value = settings().excludeTags || ''; }, async () => { const before = settings().excludeTags; settings().excludeTags = exclude.value; try { await persistSettings(); } catch(error) { settings().excludeTags = before; exclude.value = before || ''; showStatus('排除规则保存失败：' + error.message, true); } }));
+    const bodyTags = panel.querySelector('[data-body-tags]');
+    bodyTags.value = settings().bodyTags || '';
+    bodyTags.addEventListener('change', () => configure(() => {bodyTags.value = settings().bodyTags || '';}, async () => {
+        const before = settings().bodyTags; settings().bodyTags = bodyTags.value.trim();
+        try {await persistSettings(); showStatus('正文标签已保存，只影响下次冻结的导出副本。');}
+        catch (error) {settings().bodyTags = before; bodyTags.value = before || ''; showStatus('正文标签保存失败：' + error.message, true);}
+    }));
     const charInput = panel.querySelector('[data-uvu-character]');
     charInput.addEventListener('change', () => configure(updateLinkField, async () => {
         context = getContext();
@@ -1040,6 +1084,8 @@ async function activateStorage() {
     if (enabled) enabled.checked = settings().bridgeEnabled !== false;
     if (inject) inject.checked = settings().injectMemory === true;
     if (exclude) exclude.value = settings().excludeTags || '';
+    const bodyTags = panel?.querySelector('[data-body-tags]');
+    if (bodyTags) bodyTags.value = settings().bodyTags || '';
     updateLinkField();
     updatePrompt();
     const review = panel?.querySelector('[data-online-review]');

@@ -8,7 +8,7 @@ function fixture(fetchImpl) {
         setExtensionPrompt: (key, value) => prompts.set(key, value), saveSettingsDebounced: () => {}, bridgeWrite: async () => {} };
     const sandbox = vm.createContext({ getContext: () => context, extension_prompt_types: { IN_PROMPT: 0 },
         document: { readyState: 'loading', visibilityState: 'visible', addEventListener() {} }, console, structuredClone, AbortController, AbortSignal,
-        setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto, setInterval: () => 1, clearInterval() {}, fetch: async (url, options) => {
+        TextEncoder, setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto, setInterval: () => 1, clearInterval() {}, fetch: async (url, options) => {
             if (url === '/csrf-token') return {ok:true,json:async()=>({token:'csrf'})};
             if (url.endsWith('/ui/extension-state')) {
                 await context.bridgeWrite();
@@ -514,4 +514,36 @@ test('a replaced relay suspends cached scene before startup memory injection',as
  await f.sandbox.activateStorage();
  assert.equal(f.settings.scene.suspended,true);
  assert.equal(f.prompts.get('uvu-story-bridge-continuity'),'');
+});
+
+
+test('scene export preserves whole message floors and extracts only body tags',async()=>{
+ const sent=[],f=fixture(async(url,options)=>{if(url.endsWith('/ui/events'))sent.push(JSON.parse(options.body));return {ok:true,json:async()=>({})};});
+ vm.runInContext('globalThis.finishScene=endScene;',f.sandbox);f.settings.scene.startBoundary={empty:true};
+ f.context.name1='User';f.context.chat=[{mes:'一起出门吧',is_user:true,send_date:1},{mes:'<content>第一段。\n\n第二段。</content><status>状态栏</status><small_theater>小剧场</small_theater>',name:'A',send_date:2}];
+ await f.sandbox.finishScene();
+ const parts=sent.filter(e=>e.kind==='scene_transcript');assert.equal(parts.length,2);
+ assert.equal(parts[1].payload.floor.number,2);assert.equal(parts[1].payload.floor.speaker,'A');
+ assert.equal(parts[1].payload.sceneFormat,'floors-v1');assert.match(parts[1].payload.text,/第一段。\n\n第二段。/);
+ assert.doesNotMatch(parts[1].payload.text,/状态栏|小剧场/);
+});
+
+test('long floors split only for transport and malformed body stops before any export',async()=>{
+ const f=fixture();vm.runInContext('globalThis.exportFloors=sceneFloorParts;',f.sandbox);
+ f.context.chat=[{mes:'<content>'+ '句'.repeat(9000)+'</content>',name:'A'}];
+ const parts=f.sandbox.exportFloors(f.context.chat);
+ assert.equal(parts.length,2);assert.equal(parts[0].floor.id,parts[1].floor.id);
+ assert.equal(parts[1].floor.part,2);assert.equal(parts[1].floor.partCount,2);
+ assert.equal(parts.map(item=>item.text).join('').length,9000);
+ f.context.chat=[{mes:'<content>broken<status>noise</status>'}];
+ assert.throws(()=>f.sandbox.exportFloors(f.context.chat),/未正确闭合/);
+});
+
+test('floor chunks budget JSON escapes and normalize invalid source dates',()=>{
+ const f=fixture();vm.runInContext('globalThis.exportFloors=sceneFloorParts;',f.sandbox);
+ f.context.chat=[{mes:'<content>'+ '\u0000'.repeat(8000)+'</content>',name:'名'.repeat(120),send_date:1e20}];
+ const parts=f.sandbox.exportFloors(f.context.chat);
+ assert.ok(parts.length>1);
+ assert.equal(parts.map(item=>item.text).join(''),'\u0000'.repeat(8000));
+ for(const item of parts){assert.ok(Buffer.byteLength(JSON.stringify(item))<26000);assert.equal(item.floor.createdAt,0);}
 });
