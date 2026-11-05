@@ -5,7 +5,7 @@ import { extension_prompt_types } from '../../../../script.js';
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
+const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
 let panel;
 let pollTimer;
@@ -160,13 +160,13 @@ function updatePrompt() {
     const key = activeUvuKey();
     const state = key ? settings().packetsByCharacter[key] : null;
     const mode = state?.mode || 'online';
-    const prompt = mode === 'offline' || mode === 'phone' ? memoryPrompt(key) : '';
+    const prompt = settings().bridgeEnabled !== false && (mode === 'offline' || mode === 'phone') ? memoryPrompt(key) : '';
     context.setExtensionPrompt(`${EXTENSION_ID}-continuity`, prompt, extension_prompt_types.IN_PROMPT, 0);
 }
 
 async function pollEvents() {
     context = getContext();
-    if (pollBusy || document.visibilityState !== 'visible' || !activeUvuKey()) return;
+    if (settings().bridgeEnabled === false || pollBusy || document.visibilityState !== 'visible' || !activeUvuKey()) return;
     pollBusy = true;
     const key = activeUvuKey();
     try {
@@ -258,6 +258,7 @@ function renderOnlineReview() {
 
 async function setMode(mode) {
     context = getContext();
+    if (settings().bridgeEnabled === false) throw new Error('酒馆互通插件已停用，请先开启后再切换剧情模式。');
     if (settings().scene) sceneIdentity(settings().scene);
     const characterKey = activeUvuKey();
     if (!characterKey) throw new Error('先从角色下拉列表选择对应的 UvU 角色。');
@@ -270,8 +271,20 @@ async function setMode(mode) {
     return state;
 }
 
+async function setSceneMode(mode, scene) {
+    const characterKey = String(scene?.characterKey || '');
+    if (!characterKey) throw new Error('线下场景缺少角色绑定，无法恢复线上。');
+    const state = await request('/ui/state', { method: 'PUT', body: { characterKey, mode, sceneId: mode === 'online' ? '' : String(scene.id || ''), archiveId: String(scene.uvuArchiveId || '') } });
+    const packets = settings().packetsByCharacter[characterKey] || { items: [] };
+    settings().packetsByCharacter[characterKey] = { ...packets, mode: state.mode };
+    await context.saveSettingsDebounced();
+    updatePrompt();
+    return state;
+}
+
 async function startScene() {
     context = getContext();
+    if (settings().bridgeEnabled === false) throw new Error('请先启用酒馆互通插件，再开始线下剧情。');
     if (!activeStKey() || !String(context.getCurrentChatId?.() || context.chatId || '')) throw new Error('请先在酒馆打开对应角色的私聊，再绑定并开始剧情。');
     if (sceneBusy) throw new Error('当前操作尚未完成，请稍候。');
     if (settings().scene) throw new Error('先结束当前线下剧情，再开始新的一场。');
@@ -293,7 +306,7 @@ async function startScene() {
 async function endScene() {
     context = getContext();
     const scene = settings().scene;
-    sceneIdentity(scene);
+    if (!scene?.exportParts) sceneIdentity(scene);
     if (!scene.exportParts) {
         const transcript = sceneText(context.chat.slice(scene.startIndex));
         if (!transcript) throw new Error('本场没有有效剧情，可点“结束空场”恢复线上。');
@@ -316,8 +329,7 @@ async function endScene() {
                     uvuArchiveId: scene.uvuArchiveId, messageStart: scene.startIndex, messageEnd: scene.messageEnd }
             } });
         }
-        sceneIdentity(scene);
-        await setMode('online'); settings().scene = null; await context.saveSettingsDebounced();
+        await setSceneMode('online', scene); settings().scene = null; await context.saveSettingsDebounced();
         showStatus('导出完成。回 UvU“酒馆互通”审核剧情并逐条勾选；默认不进入上下文。');
     } finally { sceneBusy = false; }
 }
@@ -370,6 +382,7 @@ function renderPanel() {
             <button type="button" data-action="pair">生成配对码</button>
             <output data-pair-code aria-live="polite">------</output>
           </div>
+          <label class="uvu-bridge-check"><input type="checkbox" data-bridge-enabled> 启用酒馆互通插件</label>
           <label class="uvu-bridge-check"><input type="checkbox" data-inject-memory> 在线记忆加入酒馆线下上下文</label>
           <div class="uvu-bridge-row">
             <button type="button" data-action="start-scene">开始线下剧情</button>
@@ -379,7 +392,7 @@ function renderPanel() {
           </div>
           <label>额外排除标签（逗号分隔，如 status_box）<input type="text" data-exclude-tags placeholder="只影响导出副本"></label>
           <button type="button" data-action="cancel-scene">结束空场 / 放弃本场导出</button>
-          <details><summary>收到的线上剧情：逐条审核</summary><div data-online-review></div></details>
+          <details><summary>收到的线上剧情：逐条审核并加入日记</summary><div data-online-review></div></details>
           <details><summary>具体操作教程与功能说明</summary>
             <ol><li><strong>先配对设备：</strong>打开 UvU“设置 → 酒馆互通”，保持本页在前台；在本扩展点“生成配对码”，把 6 位码填入 UvU 并点“连接 / 配对”。首次连接按浏览器提示允许访问本机网络；状态变成“已配对”才算完成。</li>
             <li><strong>核对角色：</strong>在酒馆打开目标角色的私聊，不要停留在群聊；从“绑定到 UvU 角色”选择对应角色，检查面板显示的酒馆角色名和 UvU 角色名/ID。人设、用户设定和头像不会自动复制，两边仍各自维护。</li>
@@ -388,7 +401,7 @@ function renderPanel() {
             <li><strong>开始线下剧情：</strong>确认仍在正确的酒馆私聊，点“开始线下剧情”，再回聊天框手动输入开场并发送。按钮只切换模式、记录起点，不会自动跳转角色或生成消息。</li>
             <li><strong>临时使用手机：</strong>线下剧情中点“拿出手机”，UvU 用自己的 API 正常回复；点“收起手机”后，后续剧情继续留在酒馆。酒馆旁白不会自动变成 UvU 消息，需要明确拿出手机并在 UvU 聊天。</li>
             <li><strong>导出并审核线下记忆：</strong>回到原酒馆聊天点“结束并导出”；在 UvU 点“收取酒馆记忆”，展开待审核剧情、查看过滤后的原文并逐条编辑/勾选后保存。只有审核通过且勾选的条目进入普通上下文或向量候选。导出中断时回原聊天重试，会继续发送同一份冻结内容。</li>
-            <li><strong>暂停和结束：</strong>切换角色前先结束本场；没有剧情要交接时点“结束空场 / 放弃本场导出”。手机后台可能暂停轮询，回到前台后再点“收取酒馆记忆”或等待自动同步；不要把后台轮询当作实时推送。</li></ol>
+            <li><strong>暂停和结束：</strong>切换角色前先结束本场；没有剧情要交接时点“结束空场 / 放弃本场导出”。切到其他酒馆聊天不会覆盖已绑定场景，回原聊天即可继续导出；如果只想安全取消，可在任意聊天点“结束空场”。取消“启用酒馆互通插件”会停止同步和记忆注入，但不会删除聊天、日记或提示词。</li></ol>
           </details>
           <p class="uvu-bridge-help">角色目录由已配对的 UvU 页面提供。开始前请核对上方“酒馆角色 → UvU 角色名（ID）”；角色切换或绑定变化时会阻止导出，避免记忆写错对象。</p>
           </div>
@@ -413,6 +426,14 @@ function renderPanel() {
         pollEvents();
     });
     updateLinkField();
+    const bridgeEnabled = panel.querySelector('[data-bridge-enabled]');
+    bridgeEnabled.checked = settings().bridgeEnabled !== false;
+    bridgeEnabled.addEventListener('change', async () => {
+        settings().bridgeEnabled = bridgeEnabled.checked;
+        await context.saveSettingsDebounced();
+        updatePrompt();
+        showStatus(bridgeEnabled.checked ? '酒馆互通已启用。' : '酒馆互通已停用；当前聊天、提示词和审核记忆不受修改。');
+    });
     const inject = panel.querySelector('[data-inject-memory]');
     inject.checked = settings().injectMemory === true;
     inject.addEventListener('change', async () => {
@@ -425,7 +446,7 @@ function renderPanel() {
         if (!action) return;
         try {
             if (sceneBusy) throw new Error('当前剧情操作尚未完成，请稍候。');
-            if (action === 'cancel-scene') { const scene = settings().scene; sceneIdentity(scene); if (!confirm('结束本场并恢复线上？尚未导出的内容仍保留在酒馆原聊天。')) return; await setMode('online'); settings().scene = null; await context.saveSettingsDebounced(); showStatus('本场已结束，未删除原聊天。'); }
+            if (action === 'cancel-scene') { const scene = settings().scene; if (!scene) throw new Error('当前没有进行中的线下剧情。'); if (!confirm('结束本场并恢复线上？尚未导出的内容仍保留在酒馆原聊天。')) return; await setSceneMode('online', scene); settings().scene = null; await context.saveSettingsDebounced(); showStatus('本场已结束，未删除原聊天；原聊天内容仍保留。'); }
             if (action === 'refresh-characters') {
                 await refreshCharacterDirectory();
                 showStatus(`已载入 ${settings().uvuCharacters.length} 个 UvU 角色。`);
