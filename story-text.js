@@ -9,12 +9,13 @@
     function clean(value, rules = '') {
         let text = String(value || '').replace(/\r\n/g, '\n');
         text = text.replace(/<(thinking|think|analysis|reasoning|cot|status|statusbar|status_panel|script|style|iframe|object|svg)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
-            .replace(/<(thinking|think|analysis|reasoning|cot|script|style)\b[^>]*>[\s\S]*$/gi, '')
+            .replace(/<(thinking|think|analysis|reasoning|cot|status|statusbar|status_panel|script|style)\b[^>]*>[\s\S]*$/gi, '')
             .replace(/<details\b[^>]*>\s*<summary[^>]*>[^<]*(?:状态|思考|思维链|status|reasoning)[\s\S]*?<\/details>/gi, '')
             .replace(/\x60{3}([^\n\x60]*)\n([\s\S]*?)\x60{3}/g, (_, lang, body) => /^(?:js|javascript|ts|typescript|css|json|python|bash|sh|sql|thinking|analysis|reasoning|status)\b/i.test(lang.trim()) ? '' : body)
             .replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '[图片略]')
             .replace(/<img\b[^>]*>/gi, '[图片略]')
             .replace(/\[图片数据:[\s\S]*?\]/gi, '[图片略]');
+        text = text.replace(/^\s*\[[^\]\r\n]{1,80}更新状态为[：:][^\]\r\n]*\]\s*$/gm, '');
         const tags = String(rules).split(/[,，\s]+/).filter(x => /^[a-z][a-z0-9_-]{0,40}$/i.test(x)).slice(0, 20);
         for (const tag of tags) text = text.replace(new RegExp('<' + tag + '\\b[^>]*>[\\s\\S]*?<\\/' + tag + '\\s*>', 'gi'), '');
         text = text.replace(/<(?:br|\/p|\/div|\/li|\/section|\/article|\/tr|\/h[1-6])\b[^>]*>/gi, '\n').replace(/<[^>]+>/g, '');

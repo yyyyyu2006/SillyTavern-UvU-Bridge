@@ -124,3 +124,65 @@ test('failed persistence rolls back the in-memory event so retry is not mistaken
     await assert.rejects(store.appendEvent(event('uvu', 'retry-me'), 'uvu'));
     assert.equal(store.listEvents('sillytavern', 0).events.length, 0);
 });
+
+
+test('repeated enabling preserves active scene and relay epoch survives restart', async t => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'uvu-epoch-'));
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    const filePath = path.join(dir, 'state.json'), store = createBridgeStore({filePath});
+    await store.setMode({characterKey:'a',mode:'offline',sceneId:'scene'});
+    await store.setEnabled(true);
+    assert.equal(store.getMode('a').mode,'offline');
+    assert.ok(store.getService().relayId);
+    const restored=createBridgeStore({filePath}); await restored.load();
+    assert.equal(restored.getService().relayId,store.getService().relayId);
+    assert.equal(store.listEvents('uvu').relayId,store.getService().relayId);
+});
+
+test('malformed nested message records are rejected without poisoning queue',async()=>{
+    const store=createBridgeStore();
+    for(const messages of [[null],[{id:'a',text:7}],[{id:'a',text:'x',messagePart:3,messagePartCount:2}]])
+        await assert.rejects(store.appendEvent(event('uvu','bad',{payload:{messages}}),'uvu'),/message/i);
+    assert.equal(store.listEvents('sillytavern').events.length,0);
+});
+
+test('readers cannot observe a draft before its disk write commits',async t=>{
+    const dir=await fs.mkdtemp(path.join(os.tmpdir(),'uvu-atomic-'));
+    t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+    const store=createBridgeStore({filePath:path.join(dir,'s.json')});
+    const original=fs.writeFile; let release,started;
+    const ready=new Promise(r=>started=r);
+    fs.writeFile=async(...args)=>{started();await new Promise(r=>release=r);return original(...args);};
+    try {
+        const pending=store.appendEvent(event('uvu','private-draft'),'uvu');
+        await ready; const visible=store.listEvents('sillytavern').events.length;
+        release(); await pending; assert.equal(visible,0);
+        assert.equal(store.listEvents('sillytavern').events.length,1);
+    } finally {fs.writeFile=original;}
+});
+
+test('extension state is isolated by Tavern account and revision checked',async()=>{
+    const store=createBridgeStore();
+    assert.equal(store.getUiState('alice').revision,0);
+    await store.putUiState('alice',{revision:0,settings:{scene:{id:'a'}}});
+    assert.equal(store.getUiState('bob').settings,null);
+    await assert.rejects(store.putUiState('alice',{revision:0,settings:{}}),/changed/i);
+    assert.equal(store.getUiState('alice').settings.scene.id,'a');
+});
+
+
+test('account review storage survives restart and failed writes retain the last confirmed revision',async t=>{
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'uvu-ui-state-'));
+ t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const filePath=path.join(dir,'state.json'),store=createBridgeStore({filePath});
+ await store.putUiState('alice',{revision:0,settings:{scene:{id:'a'},deleted:['archive:m']}});
+ const restored=createBridgeStore({filePath});await restored.load();
+ assert.equal(restored.getUiState('alice').revision,1);
+ assert.deepEqual(restored.getUiState('alice').settings.deleted,['archive:m']);
+ assert.equal(restored.getUiState('bob').settings,null);
+ const blocked=path.join(dir,'blocked');await fs.writeFile(blocked,'occupied');
+ const broken=createBridgeStore({filePath:path.join(blocked,'state.json')});
+ await assert.rejects(broken.putUiState('alice',{revision:0,settings:{scene:{id:'uncommitted'}}}));
+ assert.equal(broken.getUiState('alice').revision,0);
+ assert.equal(broken.getUiState('alice').settings,null);
+});

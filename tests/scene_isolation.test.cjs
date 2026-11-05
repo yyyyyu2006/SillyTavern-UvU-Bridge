@@ -5,13 +5,21 @@ const { createBridgeStore } = require('../server/store.js');
 function fixture(fetchImpl) {
     const prompts = new Map([['another-extension', 'UNCHANGED']]);
     const context = { extensionSettings: {}, characters: [{ avatar: 'card.png', name: 'A' }], characterId: 0, chatId: 'chat-a',
-        setExtensionPrompt: (key, value) => prompts.set(key, value), saveSettingsDebounced: async () => {} };
+        setExtensionPrompt: (key, value) => prompts.set(key, value), saveSettingsDebounced: () => {}, bridgeWrite: async () => {} };
     const sandbox = vm.createContext({ getContext: () => context, extension_prompt_types: { IN_PROMPT: 0 },
         document: { readyState: 'loading', visibilityState: 'visible', addEventListener() {} }, console, structuredClone, AbortController, AbortSignal,
-        setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto, setInterval: () => 1, clearInterval() {}, fetch: fetchImpl || (async () => ({ ok: true, json: async () => ({ token: 'csrf', enabled: true }) })) });
+        setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto, setInterval: () => 1, clearInterval() {}, fetch: async (url, options) => {
+            if (url === '/csrf-token') return {ok:true,json:async()=>({token:'csrf'})};
+            if (url.endsWith('/ui/extension-state')) {
+                await context.bridgeWrite();
+                const body = JSON.parse(options?.body || '{}');
+                return {ok:true,json:async()=>({revision: (body.revision || 0)+1})};
+            }
+            return (fetchImpl || (async () => ({ok:true,json:async()=>({token:'csrf',enabled:true})})))(url, options);
+        } });
     const source = fs.readFileSync(require.resolve('../index.js'), 'utf8').split('\n').filter(line => !line.startsWith('import ')).join('\n');
     vm.runInContext(fs.readFileSync(require.resolve('../story-text.js'), 'utf8'), sandbox);
-    vm.runInContext(source + '\ncontext=getContext(); globalThis.api={settings,updatePrompt,memoryPrompt,pollEvents,applyEnabled,invalidateRequests,request,reviewDraft,deleteReceivedItems,saveReview,renderOnlineReview,startScene};', sandbox);
+    vm.runInContext(source + '\ncontext=getContext(); durableReady=true; globalThis.api={settings,updatePrompt,memoryPrompt,pollEvents,applyEnabled,invalidateRequests,request,reviewDraft,deleteReceivedItems,saveReview,renderOnlineReview,startScene};', sandbox);
     const settings = sandbox.api.settings();
     Object.assign(settings, { bridgeEnabled: true, injectMemory: true, characterLinks: { 'character:card.png': 'uvu-a' },
         cursorByCharacter: {}, packetsByCharacter: { 'uvu-a': { mode: 'offline', sceneId: 'scene-a', sourceArchiveId: 'archive-a', items: [
@@ -102,7 +110,7 @@ test('a source whose copies were deleted stays visible and other archives can be
 
 test('explicit source selection rolls back when persistence fails', async () => {
     const f = fixture(), host = reviewDom(f); f.settings.scene = null;
-    f.context.saveSettingsDebounced = async () => { throw new Error('quota'); };
+    f.context.bridgeWrite = async () => { throw new Error('quota'); };
     f.api.renderOnlineReview();
     const select = host.children.find(child => child.tagName === 'label').children[0];
     select.value = 'archive-b'; await select.listeners.change();
@@ -180,7 +188,7 @@ test('service disable never reactivates offline mode on enable', async () => {
 
 test('review save and received-copy deletion roll back on settings failure', async () => {
     const f=fixture(), before=JSON.stringify(f.settings.packetsByCharacter['uvu-a']);
-    f.context.saveSettingsDebounced=async()=>{throw new Error('quota');};
+    f.context.bridgeWrite=async()=>{throw new Error('quota');};
     await assert.rejects(f.api.deleteReceivedItems('uvu-a','archive-a',['one']),/quota/);
     assert.equal(JSON.stringify(f.settings.packetsByCharacter['uvu-a']),before);
     const draft=f.api.reviewDraft('uvu-a',f.settings.packetsByCharacter['uvu-a']);
@@ -274,10 +282,10 @@ test('browsing and edits survive refresh and chat switches without leaking draft
 test('deleting a browsed archive rolls back on failure and preserves source memory and tombstones on success', async () => {
     const f=fixture(), host=reviewDom(f); await chooseReview(f,host,'archive-b');
     const before=JSON.stringify(f.settings.packetsByCharacter['uvu-a']);
-    f.context.saveSettingsDebounced=async()=>{throw new Error('quota');};
+    f.context.bridgeWrite=async()=>{throw new Error('quota');};
     await assert.rejects(f.api.deleteReceivedItems('uvu-a','archive-b',['two']),/quota/);
     assert.equal(JSON.stringify(f.settings.packetsByCharacter['uvu-a']),before);
-    f.context.saveSettingsDebounced=async()=>{};
+    f.context.bridgeWrite=async()=>{};
     await f.api.deleteReceivedItems('uvu-a','archive-b',['two']);
     const data=f.settings.packetsByCharacter['uvu-a'];
     assert.equal(data.items.length,1); assert.equal(data.items[0].archiveId,'archive-a');
@@ -363,4 +371,147 @@ test('manual replay after relay reinstall replaces stale handoff sequence metada
     const result=await f.api.pollEvents({manual:true});
     assert.equal(result.reviewArchiveId,'archive-b');
     assert.equal(f.settings.packetsByCharacter['uvu-a'].latestHandoff.id,'new-relay');
+});
+
+
+test('replay coalesces revisions before comparing approved edits',async()=>{
+ const events=['OLD','NEW'].map((text,i)=>({seq:i+1,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'m',text}]}}));
+ const f=fixture(async url=>({ok:true,json:async()=>url.endsWith('/csrf-token')?{token:'csrf'}:url.includes('/ui/events?')?{events}:{mode:'offline',sceneId:'scene-a',enabled:true}}));
+ f.settings.packetsByCharacter['uvu-a'].items=[{eventId:'archive-a:m',archiveId:'archive-a',sourceText:'NEW',text:'EDIT',selected:true,reviewed:true}];
+ await f.api.pollEvents({manual:true});
+ assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].text,'EDIT');
+ assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].selected,true);
+});
+
+test('first oversized receive retains bounded data instead of rejecting everything',async()=>{
+ const events=Array.from({length:501},(_,i)=>({seq:i+1,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'m'+i,text:'story'+i}]}}));
+ const f=fixture(async raw=>{const after=Number(new URL(raw,'http://localhost').searchParams.get('after'));return {ok:true,json:async()=>raw.endsWith('/csrf-token')?{token:'csrf'}:raw.includes('/ui/events?')?{events:events.filter(e=>e.seq>after).slice(0,100)}:{mode:'online',enabled:true}}});
+ f.settings.packetsByCharacter['uvu-a']={items:[]};
+ const result=await f.api.pollEvents({manual:true});
+ assert.equal(f.settings.packetsByCharacter['uvu-a'].items.length,500);
+ assert.equal(result.capacityReached,true); assert.equal(f.settings.cursorByCharacter['uvu-a'],500);
+});
+
+test('long approved memory contributes a bounded excerpt rather than disappearing',()=>{
+ const f=fixture();f.settings.packetsByCharacter['uvu-a'].items=[{eventId:'long',archiveId:'archive-a',selected:true,text:'甲'.repeat(12001)}];
+ assert.match(f.api.memoryPrompt('uvu-a'),/甲/);
+});
+
+test('invalid historical record is isolated and diagnosed without stopping later valid records',async()=>{
+ const f=fixture(async url=>({ok:true,json:async()=>url.endsWith('/csrf-token')?{token:'csrf'}:url.includes('/ui/events?')?{events:[{seq:1,characterKey:'uvu-a',kind:'memory_packet',payload:{messages:[null]}},{seq:2,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'good',text:'valid'}]}}]}:{mode:'online',enabled:true}}));
+ const result=await f.api.pollEvents({manual:true});
+ assert.equal(result.invalid,1);assert.ok(f.settings.packetsByCharacter['uvu-a'].items.some(i=>i.text==='valid'));
+});
+
+
+test('stable scene boundary survives earlier deletions and refuses missing anchor',()=>{
+ const f=fixture();vm.runInContext('globalThis.sceneRange=sceneMessages;',f.sandbox);
+ f.context.chat=[{mes:'old-a'},{mes:'old-b'},{mes:'new-a'},{mes:'new-b'}];
+ const scene={startIndex:2,startBoundary:{empty:false,anchor:require('../story-text.js').fingerprint(JSON.stringify(['old-b',false,'','']))}};
+ f.context.chat.shift();
+ assert.equal(f.sandbox.sceneRange(scene).map(m=>m.mes).join(','),'new-a,new-b');
+ f.context.chat.shift();assert.throws(()=>f.sandbox.sceneRange(scene),/起点/);
+});
+
+test('scoped recovery restores only requested archive copies as unreviewed',async()=>{
+ const events=[archiveEvent(1,'archive-a','A'),archiveEvent(2,'archive-b','B')];
+ const f=fixture(async url=>({ok:true,json:async()=>url.includes('/ui/events?')?{events}:{mode:'online',enabled:true}}));
+ vm.runInContext('globalThis.restoreCopies=restoreDeletedCopies;',f.sandbox);
+ f.sandbox.confirm=()=>true;
+ f.settings.packetsByCharacter['uvu-a'].items=[];
+ f.settings.packetsByCharacter['uvu-a'].deletedEventIds=['archive-a:same','archive-b:same'];
+ await f.sandbox.restoreCopies('uvu-a','archive-a');
+ const data=f.settings.packetsByCharacter['uvu-a'];
+ assert.equal(data.items.length,1);assert.equal(data.items[0].archiveId,'archive-a');
+ assert.equal(data.items[0].selected,false);assert.equal(data.items[0].reviewed,false);
+ assert.deepEqual(Array.from(data.deletedEventIds),['archive-b:same']);
+});
+
+test('confirmed persistence awaits server write even though Tavern debounce returns undefined',async()=>{
+ const f=fixture();f.context.saveSettingsDebounced=()=>undefined;
+ let resolve,started;const ready=new Promise(r=>started=r);
+ f.context.bridgeWrite=()=>{started();return new Promise(r=>resolve=r);};
+ let finished=false;
+ const pending=f.api.deleteReceivedItems('uvu-a','archive-a',['one']).then(()=>finished=true);
+ await ready;assert.equal(finished,false);resolve();await pending;assert.equal(finished,true);
+});
+
+
+test('scoped restore also retains new ordinary messages before acknowledging',async()=>{
+ const events=[archiveEvent(1,'archive-a','RESTORE'),{...archiveEvent(2,'archive-a','NEW'),payload:{archiveId:'archive-a',messages:[{id:'new',text:'NEW'}]}}];
+ const f=fixture(async raw=>{const after=Number(new URL(raw,'http://localhost').searchParams.get('after'));return {ok:true,json:async()=>raw.includes('/ui/events?')?{events:events.filter(e=>e.seq>after)}:{mode:'online',enabled:true}}});
+ vm.runInContext('globalThis.restoreCopies=restoreDeletedCopies;',f.sandbox);f.sandbox.confirm=()=>true;
+ f.settings.packetsByCharacter['uvu-a']={items:[],deletedEventIds:['archive-a:same']};
+ await f.sandbox.restoreCopies('uvu-a','archive-a');await f.api.pollEvents();
+ assert.equal(f.settings.packetsByCharacter['uvu-a'].items.length,2);
+});
+
+test('capacity pause retains complete multipart message for the next receive',async()=>{
+ const events=[1,2].map(part=>({seq:part,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'big',sourceMessageId:'big',revision:'r',text:part===1?'FIRST':'SECOND',messagePart:part,messagePartCount:2}]}}));
+ const f=fixture(async raw=>{const after=Number(new URL(raw,'http://localhost').searchParams.get('after'));return {ok:true,json:async()=>raw.includes('/ui/events?')?{events:events.filter(e=>e.seq>after)}:{mode:'online',enabled:true}}});
+ const data=f.settings.packetsByCharacter['uvu-a'];data.items=Array.from({length:500},(_,i)=>({eventId:'old'+i,text:'old',archiveId:'archive-a'}));
+ await f.api.pollEvents();f.settings.packetsByCharacter['uvu-a'].items.shift();await f.api.pollEvents();
+ assert.ok(f.settings.packetsByCharacter['uvu-a'].items.some(i=>i.text==='FIRSTSECOND'));
+});
+
+test('failed scene export final save keeps the frozen scene retryable',async()=>{
+ const f=fixture();vm.runInContext('globalThis.finishScene=endScene;',f.sandbox);f.context.chat=[];
+ f.settings.scene.exportParts=[{text:'story',partHash:'hash'}];
+ let writes=0;f.context.bridgeWrite=async()=>{if(++writes===2)throw new Error('quota');};
+ await assert.rejects(f.sandbox.finishScene(),/quota/);
+ assert.ok(f.settings.scene?.exportParts);assert.equal(f.settings.scene.id,'scene-a');
+});
+
+
+test('incomplete message parts never produce a complete handoff receipt',async()=>{
+ const event={seq:1,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',handoff:{id:'h',start:1,end:1,count:1},messages:[{id:'big',text:'FIRST',messagePart:1,messagePartCount:2}]}};
+ const f=fixture(async url=>({ok:true,json:async()=>url.includes('/ui/events?')?{events:[event]}:{mode:'online',enabled:true}}));
+ await f.api.pollEvents({manual:true});
+ const receipt=f.settings.packetsByCharacter['uvu-a'].handoffReceipts.h;
+ assert.equal(receipt.incomplete,true);assert.equal(receipt.retained,0);
+});
+
+test('confirmed settings write survives a navigation while its response is pending',async()=>{
+ const f=fixture();let release,started;const ready=new Promise(r=>started=r);
+ f.context.bridgeWrite=async()=>{started();await new Promise(r=>release=r);};
+ const pending=f.api.saveReview('uvu-a','archive-a');
+ await ready;f.api.invalidateRequests();f.context.chatId='chat-b';release();
+ await pending;assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].reviewed,true);
+ assert.equal(f.prompts.get('uvu-story-bridge-continuity'),'');
+});
+
+
+test('storage retry synchronizes service switch and keeps semantic controls disabled',async()=>{
+ const f=fixture(async()=>({ok:true,json:async()=>({enabled:false})}));
+ const controls=Object.fromEntries(['data-bridge-enabled','data-inject-memory','data-exclude-tags'].map(key=>[key,{disabled:true,value:'',checked:true}]));
+ const host=reviewDom(f), original=f.sandbox.testPanel.querySelector;
+ f.sandbox.testPanel.querySelector=selector=>controls[selector.slice(1,-1)] || original(selector);
+ f.sandbox.testPanel.querySelectorAll=()=>Object.values(controls);
+ vm.runInContext('durableReady=false; globalThis.activateStorage=activateStorage;',f.sandbox);
+ await f.sandbox.activateStorage();
+ assert.equal(f.settings.bridgeEnabled,false);
+ assert.equal(controls['data-bridge-enabled'].checked,false);
+ assert.equal(host.children.find(child=>child.tagName==='label').children[0].disabled,false);
+});
+
+
+test('configuration changes cannot snapshot another uncommitted review mutation',async()=>{
+ const f=fixture();vm.runInContext('globalThis.configure=configure;',f.sandbox);
+ let release,started;const ready=new Promise(r=>started=r);
+ f.context.bridgeWrite=async()=>{started();await new Promise(r=>release=r);};
+ const save=f.api.saveReview('uvu-a','archive-a');await ready;
+ let changed=false,restored=false;
+ await f.sandbox.configure(()=>{restored=true;},async()=>{changed=true;});
+ assert.equal(changed,false);assert.equal(restored,true);release();await save;
+});
+
+
+test('a replaced relay suspends cached scene before startup memory injection',async()=>{
+ const f=fixture(async()=>({ok:true,json:async()=>({enabled:true,relayId:'new-relay'})}));
+ const host=reviewDom(f);f.sandbox.testPanel.querySelectorAll=()=>[];
+ f.settings.relayByCharacter['uvu-a']='old-relay';
+ vm.runInContext('durableReady=false;globalThis.activateStorage=activateStorage;',f.sandbox);
+ await f.sandbox.activateStorage();
+ assert.equal(f.settings.scene.suspended,true);
+ assert.equal(f.prompts.get('uvu-story-bridge-continuity'),'');
 });

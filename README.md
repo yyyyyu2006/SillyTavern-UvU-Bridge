@@ -37,7 +37,7 @@ Install the repository twice because the UI extension and server plugin run in d
 
 Version 0.3.0 adds a persistent Tavern master switch, exact scene/chat/archive isolation and a version checker. Disabling clears only this extension's prompt, cancels its pending work and returns UvU modes to online. Re-enabling or refreshing the extension does not silently resume a scene: return to its original chat and press **继续本场**. Other Tavern extensions and original source conversations are unchanged.
 
-**检查版本 / 更新** reads the running server version and the public repository manifest; it does not upload chats or install code. Update the UI through Tavern's extension manager and refresh the page. Update the separate server-plugin checkout with `git pull`, then stop the running Tavern process with Ctrl+C and restart it with the user's normal startup command. Refreshing a browser tab cannot update an already-running Node server. The in-app tutorials explain every button, both review directions, errors and recovery.
+**检查版本** reads the running server version and the public repository manifest; it does not upload chats or install code. Update the UI through Tavern's extension manager and refresh the page. Update the separate server-plugin checkout with `git pull`, then stop the running Tavern process with Ctrl+C and restart it with the user's normal startup command. Refreshing a browser tab cannot update an already-running Node server. The in-app tutorials explain every button, both review directions, errors and recovery.
 
 Version 0.3.5 labels each new manual handoff with its active archive name/ID, message range, count and transfer time. Manual refresh opens the most recently handed-off archive for review while preserving the active scene's pinned memory source and export target. UvU must send a new handoff after switching archives or adding messages; refreshing Tavern cannot read unsent UvU data. If the reviewed archive differs from the next scene source, explicitly select **设为下场记忆来源** before starting. Older packets remain readable with their original archive IDs and deletion markers.
 
@@ -63,3 +63,18 @@ npm test
 ```
 
 See [the protocol](docs/protocol.md) for the event envelope and synchronization behavior.
+
+## 0.4.0 reliability update
+
+Update both the UI extension and `plugins/uvu-story-bridge`, restart Tavern normally, then refresh its page. The initial version label now comes from the loaded extension version. Checking versions does not install an update.
+
+- Reviews and scenes are persisted with confirmed writes to a separate per-account plugin file. Concurrent tabs use revision checks rather than silently overwriting each other. The original Tavern settings remain a compatibility mirror.
+- Replay coalesces revisions before comparing source text, retaining approved edits when the latest original has not changed. Changed originals require review again.
+- Capacity is 500 received copies; an oversized first transfer saves what fits and reports the remainder. Delete unwanted received copies and refresh again. No automatic eviction occurs.
+- Deleted copies remain deleted on ordinary refresh. Explicit recovery restores only the viewed archive as unreviewed copies while retained events exist. Missing queue history must be handed off again from source.
+- Per-transfer receipts distinguish relay acceptance from receiver retention, review, deletion skips and incomplete delivery. They contain counts and source identity, not extra chat turns.
+- Phone-mode handoffs cover the frozen completed turn, including replies longer than eight messages. Revised source messages are retransmitted.
+- UvU offers explicit recovery after relay reset or queue gaps; existing diaries remain, incomplete scenes are never injected.
+- Scene boundaries use a verified source anchor; removing earlier messages cannot silently shift export. Missing/edited/ambiguous anchors stop export. Legacy scenes without anchors must be ended without export before starting a new scene; source chat remains available.
+- Only derived copies are filtered. Base prompts, character cards and other extension prompts are unchanged. Selected memory has a visible 12000-character budget, with bounded excerpts and an actual-injection preview.
+- Background browser suspension can delay delivery; foreground polling resumes from persisted cursors. Physical Android/iOS behavior still requires device verification.

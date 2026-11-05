@@ -5,7 +5,7 @@ import { extension_prompt_types } from '../../../../script.js';
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const EXTENSION_VERSION = '0.3.5';
+const EXTENSION_VERSION = '0.4.0';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
@@ -33,7 +33,37 @@ function chatIdentity() { return activeStKey() + ':' + String(context.getCurrent
 function settings() {
     const root = context.extensionSettings;
     if (!root[SETTINGS_KEY] || typeof root[SETTINGS_KEY] !== 'object') root[SETTINGS_KEY] = structuredClone(DEFAULT_SETTINGS);
+    root[SETTINGS_KEY].relayByCharacter ||= {};
     return root[SETTINGS_KEY];
+}
+
+let durableReady = false;
+let durableRevision = 0;
+let durableWrites = Promise.resolve();
+async function persistSettings() {
+    const snapshot = structuredClone(settings());
+    const operation = durableWrites.then(async () => {
+        let result;
+        try { result = await request('/ui/extension-state', { method: 'PUT', body: { revision: durableRevision, settings: snapshot }, independent: true }); }
+        catch(error) {
+            const stored = await request('/ui/extension-state', {independent:true}).catch(() => null);
+            if (stored?.revision === durableRevision + 1 && JSON.stringify(stored.settings) === JSON.stringify(snapshot)) result = stored;
+            else throw error;
+        }
+        if (!Number.isInteger(result.revision) || result.revision !== durableRevision + 1) throw new Error('服务端未确认保存；请更新服务端并重试。');
+        durableRevision = result.revision;
+        // This schedules Tavern's own settings mirror, but is never treated as a disk receipt.
+        try { context.saveSettingsDebounced()?.catch?.(error => console.warn('[UvU Bridge] Tavern settings mirror:', error.message)); } catch(error) { console.warn('[UvU Bridge] Tavern settings mirror:', error.message); }
+    });
+    durableWrites = operation.catch(() => {});
+    return operation;
+}
+async function restoreSettings() {
+    const result = await request('/ui/extension-state', { independent: true });
+    if (!Number.isInteger(result.revision)) throw new Error('服务端不支持可靠保存，请更新服务端并重启酒馆。');
+    durableRevision = result.revision;
+    if (result.settings) context.extensionSettings[SETTINGS_KEY] = { ...structuredClone(DEFAULT_SETTINGS), ...result.settings };
+    else await persistSettings();
 }
 
 function activeStKey() {
@@ -87,6 +117,18 @@ async function refreshCharacterDirectory() {
     } finally { directoryRefreshBusy = false; }
 }
 
+function messageAnchor(message) {
+    return globalThis.UvUBridgeText.fingerprint(JSON.stringify([String(message?.mes || ''), Boolean(message?.is_user), String(message?.send_date || message?.timestamp || ''), String(message?.name || '')]));
+}
+function sceneMessages(scene) {
+    const boundary = scene.startBoundary;
+    if (!boundary) throw new Error('旧场景缺少可靠起点，请先核对聊天并放弃本场后重新开始；原聊天保留。');
+    if (boundary.empty) return context.chat.slice();
+    const matches = context.chat.map((message, index) => messageAnchor(message) === boundary.anchor ? index : -1).filter(index => index >= 0);
+    if (matches.length !== 1) throw new Error('本场起点消息已删除、编辑或出现重复，无法安全判断导出范围；请保留聊天，重新开始本场。');
+    return context.chat.slice(matches[0] + 1);
+}
+
 function sceneText(messages) {
     context = getContext();
     return messages.filter(message => message && !message.is_system && !message.is_hidden && !message.is_thinking).map(message => {
@@ -127,8 +169,8 @@ function splitSceneText(text, maxCodePoints = 8000) {
 }
 
 async function request(path, options = {}) {
-    const epoch = generation, controller = new AbortController();
-    requests.add(controller);
+    const epoch = generation, controller = new AbortController(), independent = options.independent === true;
+    if (!independent) requests.add(controller);
     const signal = controller.signal;
     const abort = () => controller.abort();
     const timeout = setTimeout(abort, 15000);
@@ -143,7 +185,7 @@ async function request(path, options = {}) {
         if (!csrfResponse.ok || !csrf.token) throw new Error('酒馆 CSRF 校验失败，请刷新酒馆页面后重试。');
         headers['X-CSRF-Token'] = csrf.token;
     }
-    if (generation !== epoch) throw new Error('操作期间聊天或插件开关已改变，本次请求停止。');
+    if (!independent && generation !== epoch) throw new Error('操作期间聊天或插件开关已改变，本次请求停止。');
     const response = await fetch(`${API}${path}`, {
         ...options,
         signal,
@@ -153,19 +195,21 @@ async function request(path, options = {}) {
         body: options.body ? JSON.stringify(options.body) : undefined,
     });
     const data = await response.json().catch(() => ({}));
-    if (generation !== epoch) throw new Error('操作期间聊天或插件开关已改变，本次结果未应用。');
+    if (!independent && generation !== epoch) throw new Error('操作期间聊天或插件开关已改变，本次结果未应用。');
     if (!response.ok) {
-        const help = { 401: '配对失效，请重新配对', 403: '来源、回环地址或 CSRF 校验不通过', 404: '接口不存在，请更新服务端并重启酒馆', 413: '剧情数据超过接口限制' };
+        const help = { 409: '其他标签页已更新，请保留编辑后刷新本页', 401: '配对失效，请重新配对', 403: '来源、回环地址或 CSRF 校验不通过', 404: '接口不存在，请更新服务端并重启酒馆', 413: '剧情数据超过接口限制' };
         throw new Error(`HTTP ${response.status} · ${help[response.status] || '桥接服务拒绝请求'}：${data.error || '未返回详细原因'}`);
     }
     return data;
     } catch (error) {
+        if (!independent && signal.aborted && generation !== epoch) { const cancelled = new Error('旧请求已停止'); cancelled.name = 'AbortError'; throw cancelled; }
         if (signal.aborted) throw new Error(generation !== epoch ? '聊天或开关已改变，旧请求已停止。' : '请求取消或超过 15 秒，请检查本机桥接服务。');
         throw error;
     } finally { clearTimeout(timeout); options.signal?.removeEventListener('abort', abort); requests.delete(controller); }
 }
 
 function showStatus(message, error = false) {
+    if (/旧请求已停止|聊天或开关已改变/.test(String(message))) return;
     const status = panel?.querySelector('[data-bridge-status]');
     if (!status) return;
     status.textContent = message;
@@ -180,8 +224,14 @@ function memoryPrompt(key) {
     for (const item of candidates.reverse()) {
         if (used >= 12000) break;
         const remaining = 12000 - used;
-        const text = String(item.text);
-        if (text.length > remaining) continue;
+        let text = String(item.text);
+        if (text.length > remaining) {
+            const points = Array.from(text);
+            text = '';
+            for (const point of points) { if (text.length + point.length > remaining) break; text += point; }
+            const paragraph = text.lastIndexOf('\n\n');
+            if (paragraph > text.length / 2) text = text.slice(0, paragraph);
+        }
         entries.unshift({ ...item, text });
         used += text.length;
     }
@@ -196,14 +246,15 @@ function updatePrompt() {
     const scene = settings().scene;
     let matches = false;
     try { sceneIdentity(scene); matches = scene.uvuArchiveId === state?.sourceArchiveId && scene.id === state?.sceneId && !scene.suspended; } catch {}
-    const prompt = settings().bridgeEnabled !== false && state?.enabled !== false && matches && (mode === 'offline' || mode === 'phone') ? memoryPrompt(key) : '';
+    const prompt = durableReady && settings().bridgeEnabled !== false && state?.enabled !== false && matches && (mode === 'offline' || mode === 'phone') ? memoryPrompt(key) : '';
     context.setExtensionPrompt(`${EXTENSION_ID}-continuity`, prompt, extension_prompt_types.IN_PROMPT, 0);
 }
 
 async function pollEvents(options = {}) {
     context = getContext();
+    if (!durableReady) { if (options.manual) throw new Error('可靠存储尚未就绪，请重试连接存储。'); return; }
     if (settings().bridgeEnabled === false || !activeUvuKey()) { if (options.manual) throw new Error('请启用插件并绑定当前 UvU 角色。'); return; }
-    if (pollBusy || reviewMutationBusy) { if (options.manual) throw new Error('同步或保存正在进行，请稍候再刷新。'); return; }
+    if (pollBusy || reviewMutationBusy || sceneBusy || (actionBusy && !options.manual)) { if (options.manual) throw new Error('同步或保存正在进行，请稍候再刷新。'); return; }
     if (document.visibilityState !== 'visible') return;
     pollBusy = true;
     const key = activeUvuKey();
@@ -218,6 +269,12 @@ async function pollEvents(options = {}) {
         for (let page = 0; page < (options.manual ? 100 : 5); page++) {
             const batch = await request('/ui/events?limit=100&after=' + pageCursor + '&characterKey=' + encodeURIComponent(key));
             if (epoch !== generation || settings().bridgeEnabled === false || chatIdentity() !== identity) return;
+            if (!options.manual && ((batch.relayId && settings().relayByCharacter[key] && settings().relayByCharacter[key] !== batch.relayId) || (Number.isFinite(batch.latestSeq) && batch.latestSeq < cursor))) {
+                if (settings().scene?.characterKey === key) settings().scene.suspended = true;
+                updatePrompt();
+                throw new Error('桥接服务已重建，本场已暂停；请手动刷新核对保留队列，再回原聊天继续本场。现有审核和删除标记保留。');
+            }
+            result.relayId = batch.relayId || result.relayId;
             const events = batch.events || []; result.events.push(...events); result.gapDetected ||= batch.gapDetected;
             more = events.length === 100;
             if (!more || (batch.gapDetected && !options.manual)) break;
@@ -231,7 +288,10 @@ async function pollEvents(options = {}) {
         const next = structuredClone(previous), items = next.items || [];
         next.pendingMessageParts = next.pendingMessageParts || {};
         const deleted = new Set(next.deletedEventIds || []);
-        let nextCursor = options.manual ? 0 : cursor, received = 0, deletedSkipped = 0, filtered = 0;
+        const restoring = new Set(options.restoreIds || []), restored = new Set();
+        let nextCursor = options.manual ? 0 : cursor, received = 0, filtered = 0, invalid = 0, capacityReached = false;
+        const deletedIds = new Set(), candidates = new Map(), transferMessages = new Map();
+        next.rejectedEvents = next.rejectedEvents || [];
         let latestHandoffSeq = options.manual ? 0 : Number(next.latestHandoff?.seq || 0);
         for (const event of result.events || []) {
             nextCursor = Math.max(nextCursor, Number(event.seq) || 0);
@@ -249,42 +309,101 @@ async function pollEvents(options = {}) {
             }
             const records = Array.isArray(payload.messages) ? payload.messages : [{ id: event.eventId, text: payload.text || payload.summary, createdAt: event.createdAt }];
             for (const record of records) {
+                if (!record || typeof record !== 'object' || typeof record.text !== 'string') {
+                    invalid++;
+                    next.rejectedEvents.push({eventId: event.eventId, seq: event.seq, reason: 'Invalid message record'});
+                    next.rejectedEvents = next.rejectedEvents.slice(-100);
+                    continue;
+                }
                 const sourceId = String(record.sourceMessageId || record.id || event.eventId);
                 const id = payload.archiveId ? payload.archiveId + ':' + sourceId : sourceId;
-                if (deleted.has(id)) { deletedSkipped++; continue; }
+                if (payload.handoff?.id) {
+                    const transfer = transferMessages.get(payload.handoff.id) || {handoffId: payload.handoff.id, archiveId: String(payload.archiveId || ''), expected: Number(payload.handoff.count) || 0, ids: new Set(next.handoffReceipts?.[payload.handoff.id]?.ids || [])};
+                    transfer.ids.add(id); transferMessages.set(payload.handoff.id, transfer);
+                }
+                if (deleted.has(id) && !restoring.has(id)) { deletedIds.add(id); continue; }
                 const hasParts = record.messagePart !== undefined || record.messagePartCount !== undefined;
-                const complete = hasParts
-                    ? globalThis.UvUBridgeText.addMessagePart(next.pendingMessageParts, id + ':' + String(record.revision || 'legacy'), record)
-                    : { text: record.text, createdAt: record.createdAt };
+                const partKey = id + ':' + String(record.revision || 'legacy');
+                const pendingBefore = next.pendingMessageParts[partKey] ? structuredClone(next.pendingMessageParts[partKey]) : null;
+                let complete;
+                try {
+                    complete = hasParts
+                        ? globalThis.UvUBridgeText.addMessagePart(next.pendingMessageParts, id + ':' + String(record.revision || 'legacy'), record)
+                        : { text: record.text, createdAt: record.createdAt };
+                } catch (error) {
+                    invalid++;
+                    next.rejectedEvents.push({eventId: event.eventId, seq: event.seq, reason: error.message});
+                    next.rejectedEvents = next.rejectedEvents.slice(-100);
+                    continue;
+                }
                 if (!complete) continue;
                 const text = globalThis.UvUBridgeText.clean(complete.text);
                 if (!text) { filtered++; continue; }
-                const existing = items.find(item => item.eventId === id);
-                if (existing && (existing.sourceText || existing.text) === text) continue;
-                received++;
-                const item = { eventId: id, title: String(payload.title || 'UvU 线上剧情').slice(0, 160), text, sourceText: text,
-                    createdAt: Number(complete.createdAt) || Number(record.createdAt) || event.createdAt, archiveId: payload.archiveId || '', selected: false, reviewed: false };
-                if (existing) Object.assign(existing, item); else items.push(item);
+                // Compare only the newest complete source revision against the saved review.
+                candidates.set(id, {seq: Number(event.seq) || 0, partKey, pendingBefore, item: { eventId: id, title: String(payload.title || 'UvU 线上剧情').slice(0, 160), text, sourceText: text,
+                    createdAt: Number(complete.createdAt) || Number(record.createdAt) || event.createdAt, archiveId: payload.archiveId || '', selected: false, reviewed: false }});
             }
             if (payload.archiveId && !next.sourceArchiveId) next.sourceArchiveId = payload.archiveId;
         }
-        if (items.length > 500) throw new Error('在线记忆已达 500 条，请先删除不需要的条目后重试；本批未确认。');
+        for (const {seq, item, partKey, pendingBefore} of [...candidates.values()].sort((a, b) => a.seq - b.seq)) {
+            const existing = items.find(entry => entry.eventId === item.eventId);
+            if (existing && (existing.sourceText || existing.text) === item.sourceText) continue;
+            if (!existing && items.length >= 500) {
+                capacityReached = true; more = true;
+                if (pendingBefore) next.pendingMessageParts[partKey] = pendingBefore;
+                nextCursor = Math.min(nextCursor, Math.max(0, seq - 1));
+                continue;
+            }
+            received++;
+            if (restoring.has(item.eventId)) restored.add(item.eventId);
+            if (existing) Object.assign(existing, item); else items.push(item);
+        }
+        next.deletedEventIds = [...deleted].filter(id => !restored.has(id));
+        const deletedSkipped = deletedIds.size;
+        next.handoffReceipts = next.handoffReceipts || {};
+        for (const transfer of transferMessages.values()) {
+            const ids = [...transfer.ids], retained = ids.filter(id => items.some(item => item.eventId === id));
+            next.handoffReceipts[transfer.handoffId] = {handoffId: transfer.handoffId, archiveId: transfer.archiveId, expected: transfer.expected,
+                ids, seen: ids.length, retained: retained.length, reviewed: retained.filter(id => items.some(item => item.eventId === id && item.reviewed)).length,
+                deleted: ids.filter(id => next.deletedEventIds.includes(id)).length, pendingParts: Object.keys(next.pendingMessageParts).length,
+                incomplete: ids.filter(id => items.some(item => item.eventId === id) || next.deletedEventIds.includes(id)).length < transfer.expected || ids.some(id => Object.keys(next.pendingMessageParts).some(key => key.startsWith(id + ':'))) || capacityReached, at: Date.now()};
+        }
+        next.handoffReceipts = Object.fromEntries(Object.entries(next.handoffReceipts).slice(-30));
+        next.receiveDiagnostics = {deletedSkipped, filtered, invalid, capacityReached, pendingParts: Object.keys(next.pendingMessageParts).length, at: Date.now()};
         const mode = await request('/ui/state?characterKey=' + encodeURIComponent(key));
         if (settings().bridgeEnabled === false || epoch !== generation || chatIdentity() !== identity || activeUvuKey() !== key) return;
         next.items = items; next.mode = mode.mode; next.sceneId = mode.sceneId; next.enabled = mode.enabled;
         if (nextCursor !== cursor || (result.events || []).length || previous.mode !== mode.mode || previous.sceneId !== mode.sceneId || previous.enabled !== mode.enabled) {
             settings().packetsByCharacter[key] = next;
             settings().cursorByCharacter[key] = nextCursor;
-            try { await context.saveSettingsDebounced(); }
-            catch (error) { settings().packetsByCharacter[key] = previous; settings().cursorByCharacter[key] = cursor; throw error; }
+            const oldRelay = settings().relayByCharacter[key];
+            if (result.relayId) settings().relayByCharacter[key] = result.relayId;
+            try { await persistSettings(); }
+            catch (error) { settings().packetsByCharacter[key] = previous; settings().cursorByCharacter[key] = cursor; if (oldRelay === undefined) delete settings().relayByCharacter[key]; else settings().relayByCharacter[key] = oldRelay; throw error; }
         }
         if (options.manual && next.latestHandoff?.archiveId) reviewArchives.set(JSON.stringify([identity, key]), next.latestHandoff.archiveId);
         updatePrompt(); renderOnlineReview();
         if (nextCursor > 0 && (nextCursor > cursor || options.manual)) await request('/ui/ack', { method: 'POST', body: { seq: nextCursor, characterKey: key } });
+        if (transferMessages.size) await sendHandoffReceipts(key, [...transferMessages.keys()]).catch(error => showStatus('正文已保存，回执待重试：' + error.message, true));
         if (received) showStatus('收到 ' + received + ' 条在线剧情，请在下方审核勾选后应用。');
-        return { received, total: items.filter(item => (item.archiveId || '') === (next.sourceArchiveId || '')).length, reviewArchiveId: reviewArchiveId(key, next), reviewTotal: items.filter(item => (item.archiveId || '') === reviewArchiveId(key, next)).length, allTotal: items.length, deletedSkipped, filtered, pendingParts: Object.keys(next.pendingMessageParts).length, gapDetected: result.gapDetected, more };
+        return { received, total: items.filter(item => (item.archiveId || '') === (next.sourceArchiveId || '')).length, reviewArchiveId: reviewArchiveId(key, next), reviewTotal: items.filter(item => (item.archiveId || '') === reviewArchiveId(key, next)).length, allTotal: items.length, deletedSkipped, filtered, invalid, capacityReached, pendingParts: Object.keys(next.pendingMessageParts).length, gapDetected: result.gapDetected, more };
     } catch (error) { if (options.manual) throw error; showStatus(error.message, true); }
     finally { pollBusy = false; }
+}
+
+async function sendHandoffReceipts(key, handoffIds) {
+    const data = settings().packetsByCharacter[key];
+    for (const saved of Object.values(data?.handoffReceipts || {})) {
+        if (handoffIds && !handoffIds.includes(saved.handoffId)) continue;
+        const {ids = [], ...receipt} = saved;
+        receipt.retained = ids.filter(id => data.items.some(item => item.eventId === id)).length;
+        receipt.reviewed = ids.filter(id => data.items.some(item => item.eventId === id && item.reviewed)).length;
+        receipt.deleted = ids.filter(id => data.deletedEventIds?.includes(id)).length;
+        receipt.at = Date.now();
+        await request('/ui/events', {method:'POST', body:{source:'sillytavern',kind:'handoff_receipt',characterKey:key,
+            eventId:'receipt:' + globalThis.UvUBridgeText.fingerprint(JSON.stringify(receipt)) + ':' + receipt.handoffId,
+            payload: receipt}});
+    }
 }
 
 function reviewArchiveId(key, data) {
@@ -310,7 +429,7 @@ function reviewDraft(key, data, archiveId = reviewArchiveId(key, data)) {
 
 async function saveReview(key, archiveId) {
     if (activeUvuKey() !== key) throw new Error('角色已切换，请返回原角色审核。');
-    if (pollBusy || reviewMutationBusy) throw new Error('正在同步或保存，请稍候重试。');
+    if (pollBusy || reviewMutationBusy || sceneBusy || actionBusy) throw new Error('正在同步或保存，请稍候重试。');
     const data = settings().packetsByCharacter[key];
     if (!data || reviewArchiveId(key, data) !== archiveId) throw new Error('审核存档已切换，请重新审核。');
     const previous = structuredClone(data), draft = reviewDraft(key, data);
@@ -320,15 +439,16 @@ async function saveReview(key, archiveId) {
             item.sourceText = item.sourceText || item.text;
             item.selected = draft[item.eventId].selected; item.text = globalThis.UvUBridgeText.clean(draft[item.eventId].text); item.reviewed = true;
         }
-        await context.saveSettingsDebounced();
+        await persistSettings();
         updatePrompt(); renderOnlineReview();
+        await sendHandoffReceipts(key).catch(error => showStatus('审核已保存，回执待刷新重试：' + error.message, true));
     } catch (error) { settings().packetsByCharacter[key] = previous; throw error; }
     finally { reviewMutationBusy = false; }
 }
 
 async function deleteReceivedItems(key, archiveId, eventIds) {
     if (activeUvuKey() !== key) throw new Error('角色已切换，未删除。');
-    if (pollBusy || reviewMutationBusy) throw new Error('正在同步或保存，请稍候重试。');
+    if (pollBusy || reviewMutationBusy || sceneBusy || actionBusy) throw new Error('正在同步或保存，请稍候重试。');
     const data = settings().packetsByCharacter[key];
     if (!data || reviewArchiveId(key, data) !== archiveId) throw new Error('审核存档已切换，未删除。');
     const previous = structuredClone(data), ids = new Set(eventIds);
@@ -338,11 +458,22 @@ async function deleteReceivedItems(key, archiveId, eventIds) {
     try {
         data.deletedEventIds = [...new Set([...(data.deletedEventIds || []), ...removed.map(item => item.eventId)])];
         data.items = data.items.filter(item => !removed.includes(item));
-        await context.saveSettingsDebounced();
+        await persistSettings();
         updatePrompt(); renderOnlineReview();
+        await sendHandoffReceipts(key).catch(error => showStatus('删除已保存，回执待重试：' + error.message, true));
         showStatus('已删除 ' + removed.length + ' 条酒馆接收副本；原始聊天保留，刷新不会恢复这些副本。');
     } catch (error) { settings().packetsByCharacter[key] = previous; throw error; }
     finally { reviewMutationBusy = false; }
+}
+
+async function restoreDeletedCopies(key, archiveId) {
+    if (key !== activeUvuKey()) throw new Error('角色已改变，未恢复。');
+    const data = settings().packetsByCharacter[key];
+    const ids = (data?.deletedEventIds || []).filter(id => id.startsWith(archiveId + ':'));
+    if (!ids.length) throw new Error('本存档没有可恢复的删除标记。');
+    if (!confirm('仅恢复当前查看存档的已删除副本？须重新审核；服务端已过期内容无法恢复。其他存档删除标记保留。')) return;
+    const result = await pollEvents({ manual: true, restoreIds: ids });
+    showStatus(`恢复完成：收到 ${result.received} 条，均须重新审核。未找回的副本请在 UvU 重新交接；其他存档删除标记保留。`);
 }
 
 function renderOnlineReview() {
@@ -351,7 +482,7 @@ function renderOnlineReview() {
     const key = activeUvuKey(), data = settings().packetsByCharacter[key] || { items: [] };
     const scene = settings().scene?.characterKey === key ? settings().scene : null;
     const archiveId = reviewArchiveId(key, data), identity = chatIdentity();
-    const signature = JSON.stringify([identity, key, archiveId, data.sourceArchiveId, data.items, data.archiveInfo, data.latestHandoff, data.mode, data.sceneId, data.enabled, settings().bridgeEnabled, settings().injectMemory, scene]);
+    const signature = JSON.stringify([identity, key, archiveId, data.sourceArchiveId, data.items, data.receiveDiagnostics, data.deletedEventIds, data.archiveInfo, data.latestHandoff, data.mode, data.sceneId, data.enabled, settings().bridgeEnabled, settings().injectMemory, scene]);
     if (host.dataset.signature === signature) return;
     host.dataset.signature = signature;
     host.replaceChildren();
@@ -391,6 +522,11 @@ function renderOnlineReview() {
         receipt.textContent = `当前交接：${data.archiveInfo?.[latest.archiveId]?.name || '未命名存档'}（${latest.archiveId}） · 消息 ${latest.start}–${latest.end} / 当时共 ${latest.totalMessages} 条 · ${latest.count} 条正文 · 交接时间 ${new Date(latest.at).toLocaleString()}。此处显示最近已交接的存档；UvU 切换或新增聊天后须重新交接再刷新。`;
         host.append(receipt);
     }
+    if (data.latestHandoff && data.handoffReceipts?.[data.latestHandoff.id]) {
+        const receipt = data.handoffReceipts[data.latestHandoff.id], note = document.createElement('p'); note.className = 'uvu-bridge-help';
+        note.textContent = `本次交接回执：预期 ${receipt.expected} 条，队列可见 ${receipt.seen} 条，已保留 ${receipt.retained} 条，删除跳过 ${receipt.deleted} 条；${receipt.incomplete ? '未完整收到，请重新交接所需范围' : '已核对'}。`;
+        host.append(note);
+    }
     const sourceNotice = document.createElement('p'); sourceNotice.className = 'uvu-bridge-help';
     sourceNotice.textContent = scene
         ? `本场记忆来源：${scene.uvuArchiveId || '未指定'}（已锁定）。可查看和审核其他存档，但不会将它们注入本场或改变导出目标。`
@@ -402,27 +538,39 @@ function renderOnlineReview() {
     useSource.addEventListener('click', async () => {
         const current = settings().packetsByCharacter[key];
         if (activeUvuKey() !== key || chatIdentity() !== identity || !current || reviewArchiveId(key, current) !== archiveId) return;
-        if (pollBusy || reviewMutationBusy || settings().scene?.characterKey === key) return showStatus('正在同步或本场尚未结束，未更改记忆来源。', true);
+        if (pollBusy || reviewMutationBusy || actionBusy || sceneBusy || settings().scene?.characterKey === key) return showStatus('正在同步或本场尚未结束，未更改记忆来源。', true);
         const previous = current.sourceArchiveId;
         reviewMutationBusy = true; useSource.disabled = true;
-        try { current.sourceArchiveId = archiveId; await context.saveSettingsDebounced(); updatePrompt(); renderOnlineReview(); showStatus('已设为下场记忆来源；开始新场景并开启注入后才会使用。'); }
+        try { current.sourceArchiveId = archiveId; await persistSettings(); updatePrompt(); renderOnlineReview(); showStatus('已设为下场记忆来源；开始新场景并开启注入后才会使用。'); }
         catch (error) { current.sourceArchiveId = previous; useSource.disabled = false; showStatus('设置记忆来源失败：' + error.message, true); }
         finally { reviewMutationBusy = false; }
     });
     host.append(useSource);
+    const diagnostic = document.createElement('p'); diagnostic.className = 'uvu-bridge-help';
+    const stats = data.receiveDiagnostics || {};
+    diagnostic.textContent = `接收状态：保留 ${(data.items || []).filter(item => (item.archiveId || '') === archiveId).length} 条；删除跳过 ${stats.deletedSkipped || 0} 条（去重）；过滤为空 ${stats.filtered || 0}；无效记录 ${stats.invalid || 0}；待齐分段 ${stats.pendingParts || 0}。${stats.capacityReached ? '已达 500 条容量：删除不需要的接收副本后再次刷新，剩余记录尚未确认。' : ''}`;
+    host.append(diagnostic);
+    const restore = document.createElement('button'); restore.type = 'button'; restore.textContent = '恢复本存档已删除副本';
+    restore.disabled = !(data.deletedEventIds || []).some(id => id.startsWith(archiveId + ':'));
+    restore.addEventListener('click', async () => {
+        if (chatIdentity() !== identity) return;
+        restore.disabled = true;
+        try { await restoreDeletedCopies(key, archiveId); } catch(error) { showStatus(error.message, true); }
+        finally { renderOnlineReview(); }
+    });
+    host.append(restore);
     if (!data.items?.length) {
         const empty = document.createElement('p'); empty.className = 'uvu-bridge-help';
         empty.textContent = '尚未收到在线剧情。请先在 UvU 交接所需聊天范围，再点“刷新线上存档”；有收到消息后才能选择来源存档。';
         host.append(empty);
-        return;
     }
-    if (!data.items.some(item => (item.archiveId || '') === archiveId)) {
+    if (!(data.items || []).some(item => (item.archiveId || '') === archiveId)) {
         const empty = document.createElement('p'); empty.className = 'uvu-bridge-help';
         empty.textContent = '当前查看的存档没有接收副本；其他存档仍有记录，可在上方切换。已删除的副本不会通过刷新恢复。';
         host.append(empty);
     }
     const list = document.createElement('div'); list.className = 'uvu-bridge-review-list';
-    data.items.forEach(item => {
+    (data.items || []).forEach(item => {
         if ((item.archiveId || '') !== archiveId) return;
         const row = document.createElement('details'), title = document.createElement('summary');
         const check = document.createElement('input'); check.type = 'checkbox'; check.checked = draft[item.eventId].selected;
@@ -450,8 +598,9 @@ function renderOnlineReview() {
         showStatus('审核已保存到所查看存档的记忆清单；只有本场锁定的来源存档可注入。查看其他存档不会改变本场来源或导出目标，未写入 UvU 日记。');
     });
     const count = document.createElement('p'); count.className = 'uvu-bridge-help';
-    const archiveItems = data.items.filter(item => (item.archiveId || '') === archiveId);
-    count.textContent = `本存档已接收 ${archiveItems.length} 条；未审核条目默认预选最近 50 条，编辑和勾选必须保存才会应用。`;
+    const archiveItems = (data.items || []).filter(item => (item.archiveId || '') === archiveId);
+    const selectedChars = archiveItems.filter(item => item.selected).reduce((total, item) => total + String(item.text || '').length, 0);
+    count.textContent = `已审核选中正文 ${selectedChars} 字符；本次最多取 12000 字符，超限仅注入片段，请在下方实际正文中核对或编辑缩短。本存档已接收 ${archiveItems.length} 条；未审核条目默认预选最近 50 条，编辑和勾选必须保存才会应用。`;
     const removeSelected = document.createElement('button'); removeSelected.type = 'button'; removeSelected.textContent = '删除勾选副本';
     removeSelected.addEventListener('click', async () => {
         if (chatIdentity() !== identity || activeUvuKey() !== key) return showStatus('聊天已切换，请重新打开审核面板。', true);
@@ -481,23 +630,29 @@ async function setMode(mode) {
     const characterKey = activeUvuKey();
     if (!characterKey) throw new Error('先从角色下拉列表选择对应的 UvU 角色。');
     const sceneId = mode === 'online' ? '' : settings().scene?.id || '';
-    const state = await request('/ui/state', { method: 'PUT', body: { characterKey, mode, sceneId, archiveId: settings().scene?.uvuArchiveId || '' } });
-    const packets = settings().packetsByCharacter[characterKey] || { items: [] };
-    settings().packetsByCharacter[characterKey] = { ...packets, mode: state.mode, sceneId: state.sceneId, enabled: state.enabled };
-    await context.saveSettingsDebounced();
-    updatePrompt();
-    return state;
+    return changeMode(characterKey, mode, settings().scene);
+}
+
+async function changeMode(characterKey, mode, scene) {
+    const oldRemote = await request('/ui/state?characterKey=' + encodeURIComponent(characterKey));
+    const previous = settings().packetsByCharacter[characterKey];
+    const state = await request('/ui/state', {method:'PUT',body:{characterKey,mode,sceneId:mode === 'online' ? '' : scene?.id || '',archiveId:scene?.uvuArchiveId || ''}});
+    settings().packetsByCharacter[characterKey] = {...(previous || {items:[]}),mode:state.mode,sceneId:state.sceneId,enabled:state.enabled};
+    try { await persistSettings(); }
+    catch(error) {
+        if (previous === undefined) delete settings().packetsByCharacter[characterKey]; else settings().packetsByCharacter[characterKey] = previous;
+        if (scene) scene.suspended = true;
+        try { await request('/ui/state', {method:'PUT',body:{characterKey,mode:oldRemote.mode || 'online',sceneId:oldRemote.sceneId || '',archiveId:oldRemote.archiveId || scene?.uvuArchiveId || ''}}); }
+        catch(compensation) { error.message += '；服务端模式回退未确认：' + compensation.message; }
+        updatePrompt(); throw error;
+    }
+    updatePrompt(); return state;
 }
 
 async function setSceneMode(mode, scene) {
     const characterKey = String(scene?.characterKey || '');
     if (!characterKey) throw new Error('线下场景缺少角色绑定，无法恢复线上。');
-    const state = await request('/ui/state', { method: 'PUT', body: { characterKey, mode, sceneId: mode === 'online' ? '' : String(scene.id || ''), archiveId: String(scene.uvuArchiveId || '') } });
-    const packets = settings().packetsByCharacter[characterKey] || { items: [] };
-    settings().packetsByCharacter[characterKey] = { ...packets, mode: state.mode, sceneId: state.sceneId, enabled: state.enabled };
-    await context.saveSettingsDebounced();
-    updatePrompt();
-    return state;
+    return changeMode(characterKey, mode, scene);
 }
 
 async function startScene() {
@@ -514,11 +669,11 @@ async function startScene() {
     if (reviewArchiveId(characterKey, packets) !== (packets.sourceArchiveId || '')) throw new Error('正在查看的存档与下场来源不同，请先点“设为下场记忆来源”再开始，避免使用旧存档。');
     if (!packets.sourceArchiveId) throw new Error('请先从 UvU 交接线上剧情，并在此选择来源存档后开始。');
     const draft = { id: crypto.randomUUID(), characterKey, stCharacterKey: activeStKey(),
-        uvuArchiveId: packets.sourceArchiveId || '', chatId: String(context.getCurrentChatId?.() || context.chatId || ''), startIndex: context.chat.length, startedAt: Date.now() };
+        uvuArchiveId: packets.sourceArchiveId || '', chatId: String(context.getCurrentChatId?.() || context.chatId || ''), startIndex: context.chat.length, startBoundary: {empty: context.chat.length === 0, anchor: context.chat.length ? messageAnchor(context.chat.at(-1)) : ''}, startedAt: Date.now() };
     sceneBusy = true;
     settings().scene = draft;
-    try { await setMode('offline'); await context.saveSettingsDebounced(); }
-    catch (error) { draft.suspended = true; await context.saveSettingsDebounced(); updatePrompt(); throw error; }
+    try { await setMode('offline'); await persistSettings(); }
+    catch (error) { draft.suspended = true; await persistSettings(); updatePrompt(); throw error; }
     finally { sceneBusy = false; }
     showStatus('已记录本场起点。关闭面板，在酒馆聊天框输入开场；不会自动发消息或跳转。');
 }
@@ -534,7 +689,7 @@ async function endScene() {
     try {
     if (!scene.exportParts) {
         const messageEnd = context.chat.length;
-        const transcript = sceneText(context.chat.slice(scene.startIndex, messageEnd));
+        const transcript = sceneText(sceneMessages(scene));
         if (!transcript) throw new Error('本场没有有效剧情，可点“结束空场”恢复线上。');
         const parts = splitSceneText(transcript);
         const frozen = [];
@@ -543,7 +698,7 @@ async function endScene() {
         if (epoch !== generation || settings().bridgeEnabled === false) throw new Error('场景已改变，未开始导出。');
         scene.exportParts = frozen;
         scene.messageEnd = messageEnd;
-        await context.saveSettingsDebounced();
+        await persistSettings();
     }
         for (let index = 0; index < scene.exportParts.length; index++) {
             sceneIdentity(scene);
@@ -559,7 +714,8 @@ async function endScene() {
         }
         sceneIdentity(scene);
         if (epoch !== generation) throw new Error('场景已改变，保留导出供重试。');
-        await setSceneMode('online', scene); settings().scene = null; await context.saveSettingsDebounced();
+        await setSceneMode('online', scene); settings().scene = null;
+        try { await persistSettings(); } catch(error) { settings().scene = scene; updatePrompt(); throw error; }
         showStatus('导出完成。回 UvU“酒馆互通”审核剧情并逐条勾选；默认不进入上下文。');
     } finally { sceneBusy = false; }
 }
@@ -591,17 +747,36 @@ async function checkVersion() {
 }
 
 async function applyEnabled(enabled) {
-    settings().bridgeEnabled = enabled;
+    stopPolling(); invalidateRequests();
+    settings().bridgeEnabled = false;
     if (settings().scene) settings().scene.suspended = true;
-    stopPolling(); invalidateRequests(); updatePrompt();
-    await context.saveSettingsDebounced();
+    updatePrompt();
     try {
         await request('/ui/service', { method: 'PUT', body: { enabled } });
+        settings().bridgeEnabled = enabled;
+        await persistSettings();
         if (enabled) startPolling();
-        showStatus(enabled ? '已启用；保留的剧情请回原聊天点“继续本场”，不会自动恢复。' : '已停用。后台同步和本插件记忆注入已停止，UvU 恢复普通线上模式。');
+        showStatus(enabled ? '已启用；回原聊天点“继续本场”恢复保留的剧情。' : '已停用并获服务端确认；UvU 已恢复线上模式。');
     } catch (error) {
-        showStatus(`本地已暂停。服务端开关同步失败：${error.message}。请更新并重启服务端后重试；UvU 可暂时关闭互通开关。`, true);
+        settings().bridgeEnabled = false;
+        if (settings().scene) settings().scene.suspended = true;
+        await persistSettings().catch(() => {});
+        showStatus('本地已暂停，服务端或保存未确认：' + error.message + '。请重试开关；UvU 可暂时关闭互通。', true);
+    } finally {
+        const check = panel?.querySelector('[data-bridge-enabled]');
+        if (check) check.checked = settings().bridgeEnabled !== false;
+        updatePrompt();
     }
+}
+
+async function configure(restoreControl, change) {
+    if (!durableReady || pollBusy || reviewMutationBusy || sceneBusy || actionBusy) {
+        restoreControl();
+        showStatus('同步、保存或场景操作尚未完成，请稍候再修改设置。', true);
+        return;
+    }
+    reviewMutationBusy = true;
+    try { await change(); } finally { reviewMutationBusy = false; }
 }
 
 function renderPanel() {
@@ -636,7 +811,8 @@ function renderPanel() {
         <div class="inline-drawer-content">
           <div class="uvu-bridge-fields">
           <label class="uvu-bridge-check"><input type="checkbox" data-bridge-enabled> 启用酒馆互通插件（总开关）</label>
-          <p data-version>扩展 0.3.2 · 服务端待检查</p><button type="button" data-action="check-version">检查版本 / 更新</button>
+          <button type="button" data-action="retry-storage">重试连接存储</button>
+          <p data-version>扩展 ${EXTENSION_VERSION} · 服务端待检查</p><button type="button" data-action="check-version">检查版本</button>
           <p data-bridge-status role="status">等待本机桥接服务</p>
           <p class="uvu-bridge-identity" data-current-identity>正在读取角色...</p>
           <label>绑定到 UvU 角色<select data-uvu-character autocomplete="off"><option value="">先从 UvU 同步角色目录</option></select></label>
@@ -669,7 +845,8 @@ function renderPanel() {
             <li><strong>导出并审核线下记忆：</strong>回到原酒馆聊天点“结束并导出”；在 UvU 点“收取酒馆记忆”，展开待审核剧情、查看过滤后的原文并逐条编辑/勾选后保存。只有审核通过且勾选的条目进入普通上下文或向量候选。导出中断时回原聊天重试，会继续发送同一份冻结内容。</li>
             <li><strong>暂停和结束：</strong>可以切换到其他酒馆角色或同一角色的其他聊天，本插件记忆会立即撤出；只有回到本场原聊天才会使用。取消总开关会停止请求、清除本插件注入，并通知服务端恢复 UvU 线上模式。原聊天和其他扩展的提示词不改动。重开后回原聊天点“继续本场”，不会自动恢复旧场景。</li>
             <li><strong>两个审核方向：</strong>本页“线上记忆审核”保存的是 UvU 发来的剧情副本，供酒馆使用，不会加入 UvU 日记。酒馆 → UvU 请先“结束并导出”，再在 UvU“酒馆互通 → 酒馆线下剧情 → UvU 日记”收取、勾选、保存。仅勾选正文生效；过滤只作用于副本，原始聊天保留。</li>
-            <li><strong>版本更新：</strong>“检查版本 / 更新”只读取公开版本号，不上传剧情，也不会自动安装。扩展在酒馆扩展管理中更新后刷新页面；服务端插件在 Termux 的 SillyTavern/plugins/SillyTavern-UvU-Bridge 目录执行 git pull，然后回启动酒馆的终端按 Ctrl+C 正常停止，再用原来的启动命令启动。不要仅大退 Termux。更新后再次检查扩展、服务端和协议版本。</li>
+            <li><strong>版本更新：</strong>“检查版本”只读取公开版本号，不上传剧情，也不会自动安装。扩展在酒馆扩展管理中更新后刷新页面；服务端插件在 Termux 的 SillyTavern/plugins/uvu-story-bridge 目录执行 git pull，然后回启动酒馆的终端按 Ctrl+C 正常停止，再用原来的启动命令启动。不要仅大退 Termux。更新后再次检查扩展、服务端和协议版本。</li>
+            <li><strong>可靠保存与恢复：</strong>本扩展的审核、删除标记和场景由本机服务按酒馆账户单独保存，服务端确认后才显示保存成功；多标签同时编辑会提示冲突，请保留待审编辑并刷新页面。普通刷新保留审核和删除标记；“恢复本存档已删除副本”须确认，仅恢复当前查看存档，恢复后重新审核。达到 500 条时先保留可容纳内容，删除不需要的接收副本后再刷新。已选正文最多注入 12000 字符，超长条目使用片段，下方可查看实际注入正文。剧情起点消息删除、修改或无法唯一定位时停止导出，避免错收；原聊天保留。旧场景如提示缺少可靠起点，先保留原聊天，放弃该场并重新记录起点。</li>
             <li><strong>报错与重试：</strong>401 需重新配对；403 检查来源白名单、回环地址或刷新 CSRF；404 更新服务端并重启；超时检查本机服务是否在运行。角色/存档不匹配请返回原聊天。导出分段失败可重试，已确认分段不会重复成为日记；放弃导出会发送取消标记，尚未审核的完整草稿也会被撤回。已审核日记保留，由 UvU 手动管理。</li></ol>
           </details>
           </div>
@@ -680,54 +857,60 @@ function renderPanel() {
 
     const exclude = panel.querySelector('[data-exclude-tags]');
     exclude.value = settings().excludeTags || '';
-    exclude.addEventListener('change', () => { settings().excludeTags = exclude.value; context.saveSettingsDebounced(); });
+    exclude.addEventListener('change', () => configure(() => { exclude.value = settings().excludeTags || ''; }, async () => { const before = settings().excludeTags; settings().excludeTags = exclude.value; try { await persistSettings(); } catch(error) { settings().excludeTags = before; exclude.value = before || ''; showStatus('排除规则保存失败：' + error.message, true); } }));
     const charInput = panel.querySelector('[data-uvu-character]');
-    charInput.addEventListener('change', async () => {
+    charInput.addEventListener('change', () => configure(updateLinkField, async () => {
         context = getContext();
         if (!activeStKey() || context.groupId != null) { charInput.value = ''; showStatus('请先打开酒馆角色私聊，再绑定 UvU 角色。', true); return; }
         if (settings().scene?.stCharacterKey === activeStKey()) { updateLinkField(); return showStatus('本场绑定已锁定，请先结束或放弃本场。', true); }
+        const previousLinks = structuredClone(settings().characterLinks);
         invalidateRequests();
+        charInput.disabled = true;
+        try {
         if (charInput.value) settings().characterLinks[activeStKey()] = charInput.value;
         else delete settings().characterLinks[activeStKey()];
-        await context.saveSettingsDebounced();
+        await persistSettings();
         updateLinkField();
         updatePrompt();
         renderOnlineReview();
-        pollEvents();
-    });
+        } catch(error) { settings().characterLinks = previousLinks; updateLinkField(); updatePrompt(); showStatus('绑定保存失败：' + error.message, true); }
+        finally { charInput.disabled = false; }
+    }));
     updateLinkField();
     const bridgeEnabled = panel.querySelector('[data-bridge-enabled]');
     bridgeEnabled.checked = settings().bridgeEnabled !== false;
-    bridgeEnabled.addEventListener('change', async () => {
+    bridgeEnabled.addEventListener('change', () => configure(() => { bridgeEnabled.checked = settings().bridgeEnabled !== false; }, async () => {
         bridgeEnabled.disabled = true;
         try { await applyEnabled(bridgeEnabled.checked); } finally { bridgeEnabled.disabled = false; }
-    });
+    }));
     const inject = panel.querySelector('[data-inject-memory]');
     inject.checked = settings().injectMemory === true;
-    inject.addEventListener('change', async () => {
-        settings().injectMemory = inject.checked;
-        await context.saveSettingsDebounced();
-        updatePrompt();
-        renderOnlineReview();
-    });
+    inject.addEventListener('change', () => configure(() => { inject.checked = settings().injectMemory === true; }, async () => {
+        const previous = settings().injectMemory; settings().injectMemory = inject.checked; inject.disabled = true;
+        try { await persistSettings(); } catch(error) { settings().injectMemory = previous; inject.checked = previous === true; showStatus('注入开关保存失败：' + error.message, true); }
+        finally { inject.disabled = false; updatePrompt(); renderOnlineReview(); }
+    }));
     panel.addEventListener('click', async event => {
         const action = event.target.closest('button')?.dataset.action;
         if (!action) return;
         if (actionBusy) return;
+        if (pollBusy || reviewMutationBusy || sceneBusy) return showStatus('同步或保存正在进行，请稍候再操作。', true);
         actionBusy = true;
         const button = event.target.closest('button'); button.disabled = true;
         try {
+            if (action === 'retry-storage') { await restoreSettings(); await activateStorage(); showStatus('可靠存储已恢复，角色隔离监听已生效。'); return; }
+            if (!durableReady && action !== 'check-version') throw new Error('请先重试连接存储。');
             if (sceneBusy) throw new Error('当前剧情操作尚未完成，请稍候。');
             if (action === 'check-version') await checkVersion();
             if (action === 'refresh-online') {
                 const result = await pollEvents({ manual: true });
                 if (result) {
-                    const details = [result.deletedSkipped ? `有 ${result.deletedSkipped} 个消息记录/分段因手动删除标记被跳过，刷新不会恢复删除副本。` : '', result.pendingParts ? `有 ${result.pendingParts} 条消息分段尚未收齐，请在 UvU 重新交接。` : '', result.filtered ? `有 ${result.filtered} 个记录过滤后没有正文。` : '', result.gapDetected ? '队列较早记录已不完整，本次仅恢复仍保留的内容；请在 UvU 重新交接所需范围。' : '', result.more ? '队列较长，仍有后续记录，请再次刷新。' : '', result.allTotal > result.total ? `其他来源存档还有 ${result.allTotal - result.total} 条，可直接在下拉框切换查看与审核；不会更改本场记忆来源。` : ''].filter(Boolean).join(' ');
+                    const details = [result.capacityReached ? '已达容量，已先保存可容纳的记录；删除不需要的接收副本后再刷新。' : '', result.invalid ? `有 ${result.invalid} 个无效旧记录已隔离，请核对并重新交接原文。` : '', result.deletedSkipped ? `有 ${result.deletedSkipped} 条去重消息因手动删除标记被跳过，刷新不会恢复删除副本。` : '', result.pendingParts ? `有 ${result.pendingParts} 条消息分段尚未收齐，请在 UvU 重新交接。` : '', result.filtered ? `有 ${result.filtered} 个记录过滤后没有正文。` : '', result.gapDetected ? '队列较早记录已不完整，本次仅恢复仍保留的内容；请在 UvU 重新交接所需范围。' : '', result.more ? '队列较长，仍有后续记录，请再次刷新。' : '', result.allTotal > result.total ? `其他来源存档还有 ${result.allTotal - result.total} 条，可直接在下拉框切换查看与审核；不会更改本场记忆来源。` : ''].filter(Boolean).join(' ');
                     showStatus(`刷新完成：新增或更新 ${result.received} 条；正在查看存档共 ${result.reviewTotal} 条，本场 / 下场来源共 ${result.total} 条，全部来源共 ${result.allTotal} 条。待审勾选与编辑已保留，请核对后保存。${details || (result.allTotal ? '' : '桥接队列暂未找到可用正文；请在 UvU 再点“交接所选范围”，本次会重新发送旧正文，再回这里刷新。')}`, Boolean(result.gapDetected || result.pendingParts));
                 }
             }
-            if (action === 'resume-scene') { const scene = settings().scene; sceneIdentity(scene); if (settings().bridgeEnabled === false) throw new Error('请先启用总开关'); await setSceneMode('offline', scene); scene.suspended = false; await context.saveSettingsDebounced(); updatePrompt(); showStatus('已继续原场景。'); }
-            if (action === 'cancel-scene') { const scene = settings().scene; if (!scene) throw new Error('当前没有进行中的线下剧情。'); if (!confirm('结束本场并恢复线上？原聊天保留，未审核的导出草稿将撤回。')) return; await request('/ui/events', { method: 'POST', body: { source: 'sillytavern', eventId: scene.id + ':cancel', kind: 'scene_cancelled', characterKey: scene.characterKey, sceneId: scene.id, payload: {} } }); await setSceneMode('online', scene); settings().scene = null; await context.saveSettingsDebounced(); showStatus('本场已结束，原聊天保留。'); }
+            if (action === 'resume-scene') { const scene = settings().scene; sceneIdentity(scene); if (settings().bridgeEnabled === false) throw new Error('请先启用总开关'); await setSceneMode('offline', scene); scene.suspended = false; await persistSettings(); updatePrompt(); showStatus('已继续原场景。'); }
+            if (action === 'cancel-scene') { const scene = settings().scene; if (!scene) throw new Error('当前没有进行中的线下剧情。'); if (!confirm('结束本场并恢复线上？原聊天保留，未审核的导出草稿将撤回。')) return; await request('/ui/events', { method: 'POST', body: { source: 'sillytavern', eventId: scene.id + ':cancel', kind: 'scene_cancelled', characterKey: scene.characterKey, sceneId: scene.id, payload: {} } }); await setSceneMode('online', scene); settings().scene = null; try { await persistSettings(); } catch(error) { settings().scene = scene; throw error; } showStatus('本场已结束，原聊天保留。'); }
             if (action === 'refresh-characters') {
                 await refreshCharacterDirectory();
                 showStatus(`已载入 ${settings().uvuCharacters.length} 个 UvU 角色。`);
@@ -761,14 +944,38 @@ function startPolling() {
     pollEvents();
 }
 
-function init() {
+function setStorageControls(ready) {
+    durableReady = ready;
+    for (const control of panel?.querySelectorAll('button, input, select, textarea') || [])
+        control.disabled = !ready && !['retry-storage', 'check-version'].includes(control.dataset.action);
+}
+
+async function activateStorage() {
+    const service = await request('/ui/service');
+    const scene = settings().scene;
+    if (scene && service.relayId && settings().relayByCharacter[scene.characterKey] && settings().relayByCharacter[scene.characterKey] !== service.relayId) scene.suspended = true;
+    if (service.enabled === false || settings().bridgeEnabled === false) {
+        settings().bridgeEnabled = false;
+        if (settings().scene) settings().scene.suspended = true;
+    }
+    setStorageControls(true);
+    const enabled = panel?.querySelector('[data-bridge-enabled]');
+    const inject = panel?.querySelector('[data-inject-memory]');
+    const exclude = panel?.querySelector('[data-exclude-tags]');
+    if (enabled) enabled.checked = settings().bridgeEnabled !== false;
+    if (inject) inject.checked = settings().injectMemory === true;
+    if (exclude) exclude.value = settings().excludeTags || '';
+    updateLinkField();
+    updatePrompt();
+    const review = panel?.querySelector('[data-online-review]');
+    if (review) delete review.dataset.signature;
+    renderOnlineReview();
+    startPolling();
+}
+
+async function init() {
     context = getContext();
     context.extensionSettings[SETTINGS_KEY] = { ...structuredClone(DEFAULT_SETTINGS), ...(context.extensionSettings[SETTINGS_KEY] || {}) };
-    renderPanel();
-    updatePrompt();
-    document.addEventListener('visibilitychange', pollEvents);
-    // Synchronize the persistent service switch before any automatic relay work.
-    applyEnabled(settings().bridgeEnabled !== false).catch(error => showStatus(error.message, true));
     context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
         context = getContext();
         invalidateRequests();
@@ -778,6 +985,18 @@ function init() {
         updatePrompt();
         renderOnlineReview();
     });
+    document.addEventListener('visibilitychange', pollEvents);
+    try {
+        await restoreSettings();
+        renderPanel();
+        setStorageControls(false);
+        await activateStorage();
+    } catch (error) {
+        if (!panel) renderPanel();
+        setStorageControls(false); updatePrompt();
+        showStatus('可靠存储或服务连接未就绪：' + error.message + '；请更新服务端并点“重试连接存储”。', true);
+    }
+
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });

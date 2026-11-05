@@ -51,3 +51,11 @@ Version 0.3.0 adds `scene_cancelled`: discard incomplete parts and retract unapp
 State includes `archiveId`; nonmatching UvU archives ignore scene modes. Tavern injection also requires the exact stored scene ID, card key, chat ID and source archive, enabled service and reviewed selection. A chat change invalidates pending work and clears only this extension's continuity prompt.
 
 The sequence queue is a local relay, not a shared live transcript. Each side retains its own original conversation. A scene transcript is imported only after all declared parts are present; if the queue reports a gap, the client must not claim a complete import.
+
+## 0.4.0 additive fields and persistence
+
+Service, inbox and event-list responses include a persistent `relayId`. A changed relay ID or cursor beyond latest sequence requires explicit recovery/review, never silent diary deletion. Event lists expose `gapSeq`. Repeating an unchanged service switch does not reset active scenes.
+
+`handoff_receipt` is a SillyTavern-to-UvU event containing `handoffId`, `archiveId`, expected, seen, retained, reviewed, deleted, pendingParts, incomplete and at. It acknowledges receiver state after a confirmed save, and does not enter chat or memory context.
+
+`GET /ui/extension-state` and `PUT /ui/extension-state {revision,settings}` are same-origin Tavern routes using its CSRF/authenticated account. They are not exposed on the client listener. PUT rejects stale revisions with 409. Extension state is atomically stored separately from the relay queue, so individual events do not clone the full review library. A failed or uncertain save is not acknowledged as received.

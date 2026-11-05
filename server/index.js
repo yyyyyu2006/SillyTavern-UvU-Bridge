@@ -116,6 +116,16 @@ function countPairFailure(req) {
 
 function attachRoutes(router) {
     clientCors(router);
+    // Account identity comes from Tavern authentication, never a client parameter.
+    router.get(`${ROUTE_PREFIX}/ui/extension-state`, localUi, (req, res) => {
+        try { res.json(store.getUiState(req.user?.profile?.handle)); }
+        catch (error) { sendError(res, 401, error.message); }
+    });
+    router.put(`${ROUTE_PREFIX}/ui/extension-state`, localUi, async (req, res) => {
+        if (bodySize(req) > 16 * 1024 * 1024) return sendError(res, 413, 'Extension state exceeds 16 MiB');
+        try { res.json(await store.putUiState(req.user?.profile?.handle, req.body)); }
+        catch (error) { sendError(res, /changed/.test(error.message) ? 409 : 400, error.message); }
+    });
 
     router.get(`${ROUTE_PREFIX}/health`, localUi, async (req, res) => {
         res.json({ ok: true, paired: store.hasPairedClient(), ...store.getService() });
