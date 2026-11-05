@@ -1,6 +1,10 @@
-# TauriTavern / iOS: private HTTPS relay and offline files
+# TauriTavern / iOS: start with offline files; optional private HTTPS relay
+
+**Start here:** ordinary TT users need only the UI extension and JSON files. TT does not run the SillyTavern Node server plugin. File mode is the default on both sides, needs no endpoint, pairing code, Termux or admin secret, and hides online-only controls and the ST backend tutorial. A saved TT HTTPS connection stays selected after upgrading.
 
 Version 0.5.0 adds a TT adapter. Original Node SillyTavern plugin routes, CSRF, loopback transport and injection gates remain compatible. TT has no Node server-plugin process; install the UI extension in TT and choose **TauriTavern / iOS 连接** in its existing extension panel.
+
+Version 0.5.1 adds the beginner onboarding corrections. A TT mode selection is not applied until **保存 TT 连接** succeeds. While it differs from the saved mode, the panel labels both modes and pauses sync and related actions; select the saved mode again to cancel. Saving suspends the existing scene under the original rules; return to its original chat and explicitly resume after configuration.
 
 ## Compatibility and policy
 
@@ -15,17 +19,19 @@ Desktop automated tests cover a TT ABI fixture, the actual extension panel, and 
 ## File handoff without a server
 
 1. In TT, open the intended character's private chat. Select **离线 JSON 文件** and **保存 TT 连接**. File mode stores its copies locally using TT native storage.
-2. In UvU, explicitly select and save the matching handoff character and archive. Export the intended message range as a `to-tavern` JSON file. Transfer it using your own Files/cloud/local mechanism.
-3. In TT, type the exact UvU character ID and archive ID in the file target fields. Select the file and click **导入线上交接文件**. This explicit target must match every event and the wrapper. The extension will not silently change an existing character binding. Open the correct Tavern character yourself before importing.
+2. In UvU, choose **TauriTavern / iOS → 无需服务器的文件交接**. Explicitly select and **保存角色**, then **读取所选角色当前存档**. Check the displayed character ID, archive name/ID and start/end message numbers. Export the intended message range as a `to-tavern` JSON file. Transfer it using your own Files/cloud/local mechanism.
+3. In TT, select that JSON file. The extension validates the packet and reads its exact character/archive IDs into the target fields without saving a binding, approving text or switching the current TT chat. Check the displayed IDs against UvU, then click **导入线上交接文件**. The selected target must still match every event and the wrapper. The extension will not silently change an existing character binding. Open the correct Tavern character yourself before importing.
 4. Expand **线上记忆审核**, inspect each copy, select/edit and **保存勾选与编辑**. Choose **设为下场记忆来源** for the intended archive. Enable memory injection only when desired and allowed by TT policy; then **开始线下剧情**.
 5. Manually stop the corresponding UvU automatic replies during offline play. File mode cannot control another device's mode, synchronize live or provide the phone channel. It rejects **拿出手机** until HTTPS is configured.
 6. Chat normally in TT. Click **结束并导出** to freeze complete body-only scene parts into the native file outbox. Click **下载待交接剧情 JSON** with the same character/archive target. A browser download is not a receipt from UvU.
-7. Transfer the JSON to UvU and import into that exact selected character/archive. Review the incoming scene/summary preview and confirm the chosen memory. It does not automatically become usable memory or enter the original local chat.
+7. Transfer the JSON to UvU and import into that exact selected character/archive. In **酒馆线下剧情 → UvU 记忆**, review and select complete floors. Use **生成摘要**, check/edit the preview, then **确认摘要并加入记忆**, or use **原文直接加入记忆**. Enable this page and **所选角色使用已审核的酒馆剧情记忆** when you want the saved memory in context. It does not automatically become usable memory or enter the original local chat.
 8. Keep the outbox for retry until UvU confirms saved data. **清空已交接发件箱** requires a confirmation and no active scene. Reimporting the same file is idempotent. File receipt hashes and normal source IDs preserve deduplication; file import never advances a live relay cursor or sends a relay ACK.
 
 File wrapper: `{format:'uvu-bridge-file',version:1,direction:'to-uvu'|'to-tavern',characterKey,archiveId,events}`. Limits: 16 MiB UTF-8, 2000 events, 64 KiB/event and 48 KiB/event payload. Scene parts require SHA-256 `partHash`, complete ordered scene/floor parts and valid floor metadata. Memory packet multipart messages must be complete. Target mismatch, bad checksum, missing parts and invalid identities reject before import. Checksum detects accidental corruption, not the identity of the file author; review the source text before approval. JSON is treated as data and never executed.
 
-## Deploy a private HTTPS relay
+## Optional: deploy a private HTTPS relay
+
+Choose HTTPS mode only after independently deploying the relay below on an always-on server with a domain, valid TLS and exact allowed origins. Installing the TT UI extension does not deploy a relay. The UvU site / GitHub Pages URL is a static webpage, not an API; it cannot accept bridge writes (typically HTTP 405). Both apps reject known `github.io` relay addresses before sending credentials. Use the private relay base URL instead, or keep file mode.
 
 This is a **single-user, self-hosted instance**. Every bound device shares its character directory, relay queue and mode. It is not a public multi-tenant service. Use a separate instance and separate secrets/data directory for another person. No public service or secret is embedded.
 

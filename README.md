@@ -4,7 +4,9 @@ This project is a local, opt-in bridge between the UvU phone UI and SillyTavern.
 
 ## Current status
 
-Version 0.5.0 adds TauriTavern Host ABI 2 support, a private self-hostable HTTPS relay, and reviewed offline JSON exchange. See [TT/iOS installation, deployment and operation](docs/tt-deployment.md). The existing extension panel contains the same step-by-step TT tutorial and separate endpoint/admin credential fields. No public relay or bundled secret is provided; physical iPhone/iPad execution is not yet verified. Original Node Tavern installation below remains available.
+Version 0.5.1 clarifies the default TT file workflow, validates file target IDs and rejects static Pages relay addresses. Changing the TT mode is a pending choice until **保存 TT 连接**; a visible notice identifies the saved/current and selected modes, and sync plus mode-dependent operations pause until saved or reverted.
+
+Version 0.5.0 adds TauriTavern Host ABI 2 support, a private self-hostable HTTPS relay, and reviewed offline JSON exchange. See [TT/iOS installation, deployment and operation](docs/tt-deployment.md). TT defaults to **无需服务器的文件交接**: install the UI extension, export UvU JSON, import and review it in TT, start/end a scene, download the return JSON, then import and approve it in UvU. The file target IDs are read from the validated packet. No Termux, Node backend, endpoint or pairing code is required for this workflow. The panel hides ST backend instructions and shows relay/admin controls only after selecting optional HTTPS mode. Existing saved HTTPS connections remain selected. No public relay or bundled secret is provided; physical iPhone/iPad execution is not yet verified. Original Node Tavern installation below remains available.
 
 The repository includes the SillyTavern UI extension, local server plugin, protocol tests, and the reusable browser client at `client/uvu-bridge-client.js`. The matching UvU-side connection panel is maintained in the separate UvU app repository; users need a UvU deployment that includes that integration for end-to-end use.
 
@@ -26,7 +28,9 @@ SillyTavern server plugins run with server-side privileges. Review the source be
 - Memory injection is opt-in and uses SillyTavern's extension-prompt facility, not edits to the character card or base prompt.
 - Switching modes never deletes either app's source conversation.
 
-## Installation overview
+## SillyTavern Node installation overview
+
+**TT users:** skip this section and follow the [file workflow](docs/tt-deployment.md#file-handoff-without-a-server). TT has no SillyTavern Node backend. Optional realtime operation needs a separately deployed private relay with a server, domain and TLS; your UvU / GitHub Pages URL is not a relay.
 
 Install the repository twice because the UI extension and server plugin run in different parts of SillyTavern:
 

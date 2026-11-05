@@ -35,3 +35,6 @@
 .uvu-bridge-panel [data-device-list] { max-height: 220px; overflow-y: auto; }
 .uvu-bridge-panel .uvu-bridge-device { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 6px 0; }
 .uvu-bridge-panel .uvu-bridge-device span { flex: 1 1 150px; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+
+.uvu-bridge-panel [hidden] { display: none !important; }
+.uvu-bridge-panel, .uvu-bridge-panel label, .uvu-bridge-panel .uvu-bridge-fields { min-width: 0; overflow-wrap: anywhere; }

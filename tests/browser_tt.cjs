@@ -33,9 +33,23 @@ const root=path.resolve(__dirname,'..');
  }
  try{
   await initialize();assert.equal(await page.locator('[data-tt-config]').isVisible(),true);
+  assert.equal(await page.locator('[data-tt-mode]').inputValue(),'file');
+  for(const selector of ['[data-tt-endpoint]','[data-tt-secret]','[data-action="pair"]','[data-pairing-panel]','[data-st-only]','[data-action="phone-mode"]'])assert.equal(await page.locator(selector).isVisible(),false,selector);
+  assert.match(await page.locator('[data-bridge-status]').innerText(),/文件模式已就绪/);
+  assert.doesNotMatch(await page.locator('[data-version]').innerText(),/待检查|服务端待/);
+  await page.locator('[data-tt-mode]').selectOption('https');
+  assert.match(await page.locator('[data-tt-pending]').innerText(),/当前已保存：文件/);
+  assert.equal(await page.locator('[data-action="start-scene"]').isDisabled(),true);assert.equal(await page.locator('[data-action="import-file"]').isDisabled(),true);
+  assert.equal(await page.locator('[data-action="save-tt"]').isDisabled(),false);assert.equal(await page.locator('[data-tt-mode]').isDisabled(),false);
+  await page.locator('[data-tt-mode]').selectOption('file');assert.equal(await page.locator('[data-tt-pending]').isVisible(),false);
+  assert.equal(await page.locator('[data-action="start-scene"]').isDisabled(),false);
+  const artifactDir=path.resolve(root,'../uvu-verification-deps/artifacts');fs.mkdirSync(artifactDir,{recursive:true});
+  for(const width of [320,390]){await page.setViewportSize({width,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.screenshot({path:path.join(artifactDir,'tt-file-'+width+'.png'),fullPage:true});}
   await page.locator('[data-file-character]').fill('c');await page.locator('[data-file-archive]').fill('a');
   const file={format:'uvu-bridge-file',version:1,direction:'to-tavern',characterKey:'c',archiveId:'a',events:[{source:'uvu',eventId:'m1',kind:'memory_packet',characterKey:'c',payload:{archiveId:'a',messages:[{id:'msg1',text:'Imported file source'}]}}]};
   await page.locator('[data-file-input]').setInputFiles({name:'handoff.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(file))});
+  await page.waitForFunction(()=>document.querySelector('[data-bridge-status]').textContent.includes('已校验文件目标'));
+  assert.equal(await page.locator('[data-file-character]').inputValue(),'c');assert.equal(await page.locator('[data-file-archive]').inputValue(),'a');
   await page.getByRole('button',{name:'导入线上交接文件',exact:true}).click();
   await page.waitForFunction(()=>JSON.parse(localStorage.getItem('tt-test:settings')).packetsByCharacter.c.items.length===1);
   assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('tt-test:settings')).packetsByCharacter.c.items[0].reviewed),false);
@@ -54,6 +68,11 @@ const root=path.resolve(__dirname,'..');
   await initialize();assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('tt-test:settings')).packetsByCharacter.c.items[0].reviewed),true);
   await page.locator('[data-tt-mode]').selectOption('https');await page.locator('[data-tt-endpoint]').fill(endpoint);await page.locator('[data-tt-secret]').fill(adminSecret);
   await page.getByRole('button',{name:'保存 TT 连接',exact:true}).click();await page.waitForFunction(()=>document.querySelector('[data-bridge-status]').textContent.includes('HTTPS 连接已保存'));
+  await page.locator('[data-tt-mode]').selectOption('file');
+  await page.waitForFunction(()=>document.querySelector('[data-tt-pending]').hidden===false);
+  assert.match(await page.locator('[data-tt-pending]').innerText(),/当前已保存：HTTPS/);
+  assert.equal(await page.locator('[data-action="export-file"]').isDisabled(),true);assert.equal(await page.locator('[data-action="start-scene"]').isDisabled(),true);
+  await page.locator('[data-tt-mode]').selectOption('https');assert.equal(await page.locator('[data-tt-pending]').isVisible(),false);
   await page.getByText('永久配对与已绑定设备',{exact:true}).click();await page.getByRole('button',{name:'生成 / 重置永久码',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('[data-permanent-code]').textContent.length===32);
   const code=await page.locator('[data-permanent-code]').innerText();
@@ -62,7 +81,6 @@ const root=path.resolve(__dirname,'..');
   await page.evaluate(async({endpoint,token})=>{const r=await fetch(endpoint+'/v1/client/events',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({source:'uvu',kind:'memory_packet',eventId:'relay-message',characterKey:'c',payload:{archiveId:'a',messages:[{id:'remote',text:'Real relay source'}]}})});if(!r.ok)throw Error('send '+r.status);},{endpoint,token:device.token});
   await page.getByText('UvU → 酒馆：线上记忆审核',{exact:true}).click();await page.getByRole('button',{name:'刷新线上存档',exact:true}).click();
   await page.waitForFunction(()=>JSON.parse(localStorage.getItem('tt-test:settings')).packetsByCharacter.c.items.some(item=>item.text==='Real relay source'));
-  const artifactDir=path.resolve(root,'../uvu-verification-deps/artifacts');fs.mkdirSync(artifactDir,{recursive:true});
   for(const width of [320,390,1280]){
    await page.setViewportSize({width,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true,'horizontal overflow '+width);
    await page.screenshot({path:path.join(artifactDir,'tt-panel-'+width+'.png'),fullPage:true});
