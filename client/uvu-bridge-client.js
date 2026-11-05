@@ -6,12 +6,14 @@ export class UvUStoryBridgeClient {
         this.storage = storage;
         this.fetchImpl = fetchImpl;
         this.token = '';
-        try { this.token = JSON.parse(this.storage?.getItem(BRIDGE_STORAGE_KEY) || '{}').token || ''; } catch { /* Treat invalid local state as disconnected. */ }
+        this.boundUrl = '';
+        try { const saved=JSON.parse(this.storage?.getItem(BRIDGE_STORAGE_KEY) || '{}');this.token=saved.token || '';this.boundUrl=saved.baseUrl || (this.token ? this.baseUrl : ''); } catch { /* Treat invalid local state as disconnected. */ }
     }
 
-    saveToken(token) {
+    saveToken(token, device) {
         this.token = token;
-        if (token) this.storage?.setItem(BRIDGE_STORAGE_KEY, JSON.stringify({ token }));
+        this.boundUrl = token ? this.baseUrl : '';
+        if (token) this.storage?.setItem(BRIDGE_STORAGE_KEY, JSON.stringify({ token, baseUrl:this.boundUrl, device }));
         else this.storage?.removeItem(BRIDGE_STORAGE_KEY);
     }
 
@@ -21,6 +23,7 @@ export class UvUStoryBridgeClient {
         if (body !== undefined) headers['Content-Type'] = 'application/json';
         if (auth) {
             if (!this.token) throw new Error('尚未配对酒馆。');
+            if (this.boundUrl !== this.baseUrl) throw new Error('桥接地址已改变，请恢复原地址或重新绑定。');
             headers.Authorization = `Bearer ${this.token}`;
         }
         let response;
@@ -37,16 +40,20 @@ export class UvUStoryBridgeClient {
         return data;
     }
 
-    async pair(code) {
-        const { token } = await this.request('/client/pair', { method: 'POST', body: { code: String(code || '').trim() }, auth: false });
+    async pair(code, name = 'UvU 浏览器') {
+        const address=this.baseUrl;
+        const { token, device } = await this.request('/client/pair', { method: 'POST', body: { code: String(code || '').trim(), device:{name:String(name).slice(0,80)} }, auth: false });
         if (!token) throw new Error('酒馆没有返回配对令牌。');
-        this.saveToken(token);
+        if (this.baseUrl!==address) throw new Error('桥接地址已改变，请重新绑定。');
+        this.saveToken(token,device);
         return token;
     }
 
     getState(characterKey, signal) {
         return this.request(`/client/state?characterKey=${encodeURIComponent(characterKey)}`, { signal });
     }
+
+    getSession(signal) { return this.request('/client/session', {signal}); }
 
     setMode(value, signal) {
         return this.request('/client/state', { method: 'PUT', body: value, signal });

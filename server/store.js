@@ -9,7 +9,7 @@ const MODES = new Set(['online', 'offline', 'phone']);
 const SOURCES = new Set(['uvu', 'sillytavern']);
 
 function emptyState() {
-    return { version: 1, relayId: crypto.randomUUID(), enabled: true, nextSeq: 1, events: [], cursors: {}, gaps: {}, modes: {}, characters: [], tokenHash: null };
+    return { version: 1, relayId: crypto.randomUUID(), enabled: true, nextSeq: 1, events: [], cursors: {}, gaps: {}, modes: {}, characters: [], tokenHash: null, devices: [], pairing: {mode:'temporary', hash:null, createdAt:null} };
 }
 
 function digest(value) {
@@ -105,6 +105,8 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
                 events: raw.events.filter(event => event && SOURCES.has(event.source) && SOURCES.has(event.target) && EVENT_KINDS.has(event.kind)),
                 nextSeq: Math.max(1, Number(raw.nextSeq) || 1),
                 tokenHash: typeof raw.tokenHash === 'string' ? raw.tokenHash : null,
+                devices: Array.isArray(raw.devices) ? raw.devices.filter(d => d && typeof d.id === 'string' && /^[a-f0-9]{64}$/.test(d.tokenHash)).slice(0, 50) : [],
+                pairing: raw.pairing && ['temporary','permanent'].includes(raw.pairing.mode) && (!raw.pairing.hash || /^[a-f0-9]{64}$/.test(raw.pairing.hash)) ? raw.pairing : {mode:'temporary',hash:null,createdAt:null},
             };
             if (!raw.relayId) await save(state);
             pair = null;
@@ -123,29 +125,69 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         return { code, expiresAt: pair.expiresAt };
     }
 
-    async function claimPair(code) {
-        const candidate = digest(String(code || '').trim());
-        if (!pair || pair.expiresAt <= now() || !crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(pair.hash))) {
-            throw new Error('Pair code is invalid or expired');
-        }
-        pair = null;
+    const matchesHash = (candidate, hash) => typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash) && crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(hash));
+    function getPairing() { return {mode:state.pairing.mode, hasPermanent:Boolean(state.pairing.hash), createdAt:state.pairing.createdAt}; }
+    async function createPermanentPairCode() {
+        const code = crypto.randomBytes(24).toString('base64url');
+        await mutate(draft => { draft.pairing = {mode:'permanent',hash:digest(code),createdAt:now()}; });
+        return {code,expiresAt:null,mode:'permanent'};
+    }
+    async function setPairingMode(mode) {
+        if (!['temporary','permanent'].includes(mode)) throw new Error('Invalid pairing mode');
+        await mutate(draft => {
+            if (mode === 'permanent' && !draft.pairing.hash) throw new Error('Generate a permanent code first');
+            draft.pairing.mode = mode;
+        });
+        return getPairing();
+    }
+    async function claimPair(code, device = {}) {
+        if (typeof code !== 'string' || code.length > 128) throw Object.assign(new Error('Pair code is invalid or expired'), {status:401});
+        const candidate = digest(code.trim()), attempt = pair;
         const token = crypto.randomBytes(32).toString('base64url');
-        await mutate(state => { state.tokenHash = digest(token); });
+        let usedTemporary = false;
+        await mutate(draft => {
+            const temporary = draft.pairing.mode === 'temporary' && attempt && pair === attempt && !attempt.claiming && attempt.expiresAt > now() && matchesHash(candidate, attempt.hash);
+            const permanent = draft.pairing.mode === 'permanent' && matchesHash(candidate, draft.pairing.hash);
+            if (!temporary && !permanent) throw Object.assign(new Error('Pair code is invalid or expired'), {status:401});
+            if (draft.devices.length >= 50) throw Object.assign(new Error('Device limit reached; revoke an unused device first'), {status:409});
+            if (temporary) {attempt.claiming = true; usedTemporary = true;}
+            draft.devices.push({id:crypto.randomUUID(),tokenHash:digest(token),name:String(device?.name || 'UvU 浏览器').replace(/[\x00-\x1f\x7f]/g,'').slice(0,80),createdAt:now(),lastSeenAt:now()});
+        }).catch(error => {if (usedTemporary) delete attempt.claiming; throw error;});
+        if (usedTemporary && pair === attempt) pair = null;
         return token;
     }
 
     function isAuthorized(token) {
-        if (!state.tokenHash || !token) return false;
+        if (!token) return false;
         const candidate = digest(token);
-        return crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(state.tokenHash));
+        return matchesHash(candidate,state.tokenHash) || state.devices.some(d => matchesHash(candidate,d.tokenHash));
     }
 
     function hasPairedClient() {
-        return typeof state.tokenHash === 'string' && state.tokenHash.length > 0;
+        return Boolean(state.tokenHash || state.devices.length);
     }
 
-    async function revokeToken() {
-        await mutate(state => { state.tokenHash = null; });
+    async function revokeToken(token) {
+        // No-argument compatibility is reserved for trusted local callers. HTTP always passes its bearer.
+        if (token === undefined) return revokeAllDevices();
+        const hash = digest(token);
+        await mutate(draft => {if (matchesHash(hash,draft.tokenHash)) draft.tokenHash=null; draft.devices=draft.devices.filter(d=>!matchesHash(hash,d.tokenHash));});
+    }
+    function listDevices() {
+        return [...(state.tokenHash ? [{id:'legacy',name:'升级前已绑定设备',createdAt:null,lastSeenAt:null,legacy:true}] : []),
+            ...state.devices.map(({id,name,createdAt,lastSeenAt})=>({id,name,createdAt,lastSeenAt}))];
+    }
+    async function revokeDevice(id) {
+        if (typeof id !== 'string' || !listDevices().some(d=>d.id===id)) throw new Error('Device not found');
+        await mutate(draft => {if(id==='legacy')draft.tokenHash=null;else draft.devices=draft.devices.filter(d=>d.id!==id);});
+    }
+    async function revokeAllDevices() { await mutate(draft=>{draft.tokenHash=null;draft.devices=[];}); }
+    async function getSession(token) {
+        if (!isAuthorized(token)) throw Object.assign(new Error('This device is not paired'), {status:401});
+        const hash=digest(token),device=state.devices.find(d=>matchesHash(hash,d.tokenHash));
+        if (device && now()-device.lastSeenAt>=60000) await mutate(draft=>{const current=draft.devices.find(d=>d.id===device.id);if(!current)throw Object.assign(new Error('This device is not paired'), {status:401});current.lastSeenAt=now();});
+        if (!isAuthorized(token)) throw Object.assign(new Error('This device is not paired'), {status:401});
+        return {paired:true,device:listDevices().find(d=>d.id===(device?.id || 'legacy'))};
     }
 
     async function appendEvent(input, source) {
@@ -271,7 +313,7 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         return operation;
     }
 
-    return { getUiState, putUiState, load, createPairCode, claimPair, isAuthorized, hasPairedClient, revokeToken, appendEvent, listEvents, inbox, acknowledge, getMode, setMode, getService, setEnabled, listCharacters, setCharacters };
+    return { getPairing, createPermanentPairCode, setPairingMode, listDevices, revokeDevice, revokeAllDevices, getSession, getUiState, putUiState, load, createPairCode, claimPair, isAuthorized, hasPairedClient, revokeToken, appendEvent, listEvents, inbox, acknowledge, getMode, setMode, getService, setEnabled, listCharacters, setCharacters };
 }
 
 module.exports = { createBridgeStore, validateEvent, EVENT_KINDS, MODES, SOURCES };

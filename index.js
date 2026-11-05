@@ -5,7 +5,7 @@ import { extension_prompt_types } from '../../../../script.js';
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const EXTENSION_VERSION = '0.4.0';
+const EXTENSION_VERSION = '0.4.1';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
@@ -17,6 +17,8 @@ let directoryRefreshBusy = false;
 let sceneBusy = false;
 let actionBusy = false;
 let reviewMutationBusy = false;
+let pairingInfo = null;
+let shownPermanentCode = '';
 const reviewDrafts = new Map();
 const reviewArchives = new Map();
 let generation = 0;
@@ -722,12 +724,54 @@ async function endScene() {
 
 async function refreshPairCode() {
     try {
+        await request('/ui/pairing', {method:'PUT',body:{mode:'temporary'}});
         const result = await request('/ui/pair-code');
         const code = panel.querySelector('[data-pair-code]');
         code.textContent = result.code;
         panel.querySelector('[data-pair-expiry]').textContent = '有效至 ' + new Date(result.expiresAt).toLocaleTimeString();
+        await refreshPairing();
         showStatus('请在 UvU 的酒馆连接设置中输入此一次性配对码。');
     } catch (error) { showStatus(error.message, true); }
+}
+
+async function refreshPairing() {
+    const result = await request('/ui/pairing');
+    if (pairingInfo?.createdAt !== result.createdAt) shownPermanentCode = '';
+    pairingInfo = result;
+    const mode = panel?.querySelector('[data-pairing-mode]');
+    if (mode) mode.value = result.mode || 'temporary';
+    const code = panel?.querySelector('[data-permanent-code]');
+    if (code) code.textContent = shownPermanentCode || (result.hasPermanent ? '已设置；原码不回显，遗忘时可重置' : '尚未生成永久码');
+    const note = panel?.querySelector('[data-pairing-status]');
+    if (note) note.textContent = result.mode === 'permanent' ? '永久码长期有效，直到重置；已绑定设备不受重置影响。' : '当前使用一次性码；已有设备仍保持长期绑定。';
+    const list = panel?.querySelector('[data-device-list]');
+    if (!list) return;
+    list.replaceChildren();
+    if (!result.devices?.length) list.textContent = '暂无已绑定设备。';
+    for (const device of result.devices || []) {
+        const row = document.createElement('div'); row.className = 'uvu-bridge-device';
+        const label = document.createElement('span');
+        const date = stamp => stamp ? new Date(stamp).toLocaleString() : '旧版未记录';
+        label.textContent = `${device.name} · 绑定 ${date(device.createdAt)} · 最近连接 ${date(device.lastSeenAt)}`;
+        const remove = document.createElement('button');remove.type='button';remove.textContent='解除绑定';
+        remove.addEventListener('click', () => configure(() => {}, async () => {
+            if (!confirm(`解除“${device.name}”的绑定？只影响这台设备，原聊天和记忆保留。`)) return;
+            remove.disabled=true;
+            try {await request('/ui/revoke-device',{method:'POST',body:{id:device.id}});await refreshPairing();showStatus('已解除指定设备绑定。');}
+            catch(error){showStatus('解除设备失败：'+error.message,true);}
+            finally{remove.disabled=false;}
+        }));
+        row.append(label,remove);list.append(row);
+    }
+}
+
+async function generatePermanentCode() {
+    if (pairingInfo?.hasPermanent && !confirm('重置永久配对码？旧码将不能用于新配对，已经绑定的设备继续有效。')) return;
+    const result=await request('/ui/permanent-code',{method:'POST',body:{}});
+    await refreshPairing();
+    shownPermanentCode=result.code;
+    const code=panel?.querySelector('[data-permanent-code]');if(code)code.textContent=result.code;
+    showStatus('永久码已保存并启用；请复制到 UvU 配对。此码仅本次显示，刷新后不回显。');
 }
 
 async function checkVersion() {
@@ -822,6 +866,14 @@ function renderPanel() {
             <output data-pair-code aria-live="polite">------</output>
             <small data-pair-expiry></small>
           </div>
+          <details data-pairing-panel><summary>永久配对与已绑定设备</summary>
+            <label>配对方式<select data-pairing-mode><option value="temporary">一次性配对码</option><option value="permanent">永久配对码</option></select></label>
+            <p class="uvu-bridge-help" data-pairing-status>点击“刷新设备”读取设置。</p>
+            <output data-permanent-code class="uvu-bridge-secret">尚未读取永久码状态</output>
+            <div class="uvu-bridge-row"><button type="button" data-action="permanent-code">生成 / 重置永久码</button><button type="button" data-action="copy-permanent">复制永久码</button><button type="button" data-action="refresh-devices">刷新设备</button><button type="button" data-action="revoke-all">解除全部设备</button></div>
+            <div data-device-list></div>
+            <p class="uvu-bridge-help">每个浏览器独立绑定；重置码不会解绑设备，关闭插件也不会删除绑定。设备共用本机桥接目录，不会自动合并不同 UvU 数据库。勿将永久码发给其他玩家。</p>
+          </details>
           <label class="uvu-bridge-check"><input type="checkbox" data-inject-memory> 在线记忆加入酒馆线下上下文</label>
           <div class="uvu-bridge-row">
             <button type="button" data-action="start-scene">开始线下剧情</button>
@@ -836,7 +888,7 @@ function renderPanel() {
           <p class="uvu-bridge-help">角色目录由已配对的 UvU 页面提供。开始前请核对酒馆角色、UvU 角色名与 ID；绑定、聊天、来源存档在本场锁定。切换聊天不会把场景记忆带给其他角色。</p>
           <details><summary>具体操作教程与功能说明</summary>
             <p>按钮说明：“刷新 UvU 角色”只读取目录；“生成配对码”生成五分钟有效的六位码；“开始线下剧情”锁定角色、聊天和来源存档并记录起点；“继续本场”恢复暂停的原场景；“拿出手机”允许 UvU 回复；“收起手机”让剧情继续留在酒馆；“结束并导出”发送剧情副本给 UvU 审核；“结束空场 / 放弃本场导出”恢复线上并撤回未审核草稿。两边不会自动复制人设或互相调用回复 API。</p>
-            <ol><li><strong>先配对设备：</strong>打开 UvU“设置 → 酒馆互通”，保持本页在前台；在本扩展点“生成配对码”，把 6 位码填入 UvU 并点“连接 / 配对”。首次连接按浏览器提示允许访问本机网络；状态变成“已配对”才算完成。</li>
+            <ol><li><strong>先配对设备：</strong>打开 UvU“设置 → 酒馆互通”，保持本页在前台；在本扩展点“生成配对码”，把六位一次性码填入 UvU 并点“连接 / 配对”；也可展开“永久配对与已绑定设备”，点“生成 / 重置永久码”，复制生成的长码到 UvU，同样点击配对。永久码只在生成时显示一次，刷新后不回显，遗忘后可重置；重置不解除已绑定设备。首次连接按浏览器提示允许访问本机网络。配对后保存独立设备凭证，关闭页面、正常重启酒馆后自动重连，无须反复输入码；同一永久码可给自己的其他浏览器绑定。设备共用本机桥接与目录，不会合并不同 UvU 数据库。</li>
             <li><strong>核对角色：</strong>在酒馆打开目标角色的私聊，不要停留在群聊；从“绑定到 UvU 角色”选择对应角色，检查面板显示的酒馆角色名和 UvU 角色名/ID。人设、用户设定和头像不会自动复制，两边仍各自维护。</li>
             <li><strong>把线上背景交给酒馆：</strong>在 UvU“酒馆互通”选角色、当前存档及消息起止编号，点“交接所选范围”。手动交接会重新发送所选范围，消息编号从 1 开始；默认取最近 50 条有效正文，也可自选编号。回酒馆展开“线上记忆审核”并点“刷新线上存档”，刷新优先展示最近一次手动交接的存档，显示名称、ID、范围和交接时间；UvU 切换存档或新增消息后须重新点“交接所选范围”，再回此刷新。也可在下拉框查看其他来源存档；0 条代表该存档没有接收副本，刷新不会恢复已删除副本。下拉框仅切换查看与审核，本场进行中也可使用，不会改变当前剧情。要换下场记忆来源，先结束并导出或放弃本场，再选择存档并点“设为下场记忆来源”，然后开始新场景。再展开每条记录核对、编辑或勾选，最后点“保存勾选与编辑”。刷新只读取已经交接的副本，不读取 UvU 尚未发送的聊天；新内容默认预选最近 50 条，未保存不注入，已审核的选择保留。原文更新后须重新审核。展开记录可“删除这条”，或点“删除勾选副本”；仅删除接收副本，刷新不会恢复，两边原聊天保留。</li>
             <li><strong>开启记忆：</strong>勾选“在线记忆加入酒馆线下上下文”。仅当前绑定角色、当前来源存档中已勾选的记录可进入线下/手机模式的扩展记忆；取消勾选会暂停注入，但保留已审核记录。</li>
@@ -847,7 +899,7 @@ function renderPanel() {
             <li><strong>两个审核方向：</strong>本页“线上记忆审核”保存的是 UvU 发来的剧情副本，供酒馆使用，不会加入 UvU 日记。酒馆 → UvU 请先“结束并导出”，再在 UvU“酒馆互通 → 酒馆线下剧情 → UvU 日记”收取、勾选、保存。仅勾选正文生效；过滤只作用于副本，原始聊天保留。</li>
             <li><strong>版本更新：</strong>“检查版本”只读取公开版本号，不上传剧情，也不会自动安装。扩展在酒馆扩展管理中更新后刷新页面；服务端插件在 Termux 的 SillyTavern/plugins/uvu-story-bridge 目录执行 git pull，然后回启动酒馆的终端按 Ctrl+C 正常停止，再用原来的启动命令启动。不要仅大退 Termux。更新后再次检查扩展、服务端和协议版本。</li>
             <li><strong>可靠保存与恢复：</strong>本扩展的审核、删除标记和场景由本机服务按酒馆账户单独保存，服务端确认后才显示保存成功；多标签同时编辑会提示冲突，请保留待审编辑并刷新页面。普通刷新保留审核和删除标记；“恢复本存档已删除副本”须确认，仅恢复当前查看存档，恢复后重新审核。达到 500 条时先保留可容纳内容，删除不需要的接收副本后再刷新。已选正文最多注入 12000 字符，超长条目使用片段，下方可查看实际注入正文。剧情起点消息删除、修改或无法唯一定位时停止导出，避免错收；原聊天保留。旧场景如提示缺少可靠起点，先保留原聊天，放弃该场并重新记录起点。</li>
-            <li><strong>报错与重试：</strong>401 需重新配对；403 检查来源白名单、回环地址或刷新 CSRF；404 更新服务端并重启；超时检查本机服务是否在运行。角色/存档不匹配请返回原聊天。导出分段失败可重试，已确认分段不会重复成为日记；放弃导出会发送取消标记，尚未审核的完整草稿也会被撤回。已审核日记保留，由 UvU 手动管理。</li></ol>
+            <li><strong>报错与重试：</strong>401 表示配对码无效或设备凭证已解除；服务离线保留绑定，前台按间隔自动重连，401 后停止自动重试。换桥接地址需重新配对。可在设备列表单独解除，或确认“解除全部设备”；这两项保留聊天和永久码。403 检查来源白名单、回环地址或刷新 CSRF；404 更新服务端并重启；超时检查本机服务是否在运行。角色/存档不匹配请返回原聊天。导出分段失败可重试，已确认分段不会重复成为日记；放弃导出会发送取消标记，尚未审核的完整草稿也会被撤回。已审核日记保留，由 UvU 手动管理。</li></ol>
           </details>
           </div>
         </div>
@@ -890,6 +942,17 @@ function renderPanel() {
         try { await persistSettings(); } catch(error) { settings().injectMemory = previous; inject.checked = previous === true; showStatus('注入开关保存失败：' + error.message, true); }
         finally { inject.disabled = false; updatePrompt(); renderOnlineReview(); }
     }));
+    const pairingMode=panel.querySelector('[data-pairing-mode]');
+    panel.querySelector('[data-pairing-panel]').addEventListener('toggle',event=>{
+        if(event.target.open && durableReady && !actionBusy && !reviewMutationBusy) refreshPairing().catch(error=>showStatus('读取设备设置失败：'+error.message,true));
+    });
+    pairingMode.addEventListener('change',()=>configure(()=>{pairingMode.value=pairingInfo?.mode || 'temporary';},async()=>{
+        const mode=pairingMode.value;
+        try {
+            if(mode==='permanent' && !pairingInfo?.hasPermanent) await generatePermanentCode();
+            else {await request('/ui/pairing',{method:'PUT',body:{mode}});await refreshPairing();}
+        } catch(error) {pairingMode.value=pairingInfo?.mode || 'temporary';showStatus('配对方式未确认：'+error.message,true);}
+    }));
     panel.addEventListener('click', async event => {
         const action = event.target.closest('button')?.dataset.action;
         if (!action) return;
@@ -916,6 +979,18 @@ function renderPanel() {
                 showStatus(`已载入 ${settings().uvuCharacters.length} 个 UvU 角色。`);
             }
             if (action === 'pair') await refreshPairCode();
+            if (action === 'permanent-code') await generatePermanentCode();
+            if (action === 'refresh-devices') {await refreshPairing();showStatus('已刷新永久码设置和设备列表。');}
+            if (action === 'copy-permanent') {
+                if(!shownPermanentCode)throw new Error('永久码只在生成时显示；如已遗忘，请先重置再复制。');
+                if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(shownPermanentCode);
+                else prompt('复制永久配对码',shownPermanentCode);
+                showStatus('永久码已准备复制；请仅用于自己的 UvU。');
+            }
+            if (action === 'revoke-all') {
+                if(!confirm('解除全部设备绑定？所有 UvU 浏览器需重新配对。永久码、角色绑定和原聊天保留。'))return;
+                await request('/ui/revoke-all',{method:'POST',body:{}});await refreshPairing();showStatus('全部设备凭证已撤销；永久码仍可用于重新绑定。');
+            }
             if (action === 'start-scene') await startScene();
             if (action === 'phone-mode') {
                 if (!settings().scene) throw new Error('先开始一场线下剧情。');

@@ -70,3 +70,24 @@ test('loopback client API rejects origins outside the plugin allowlist', async t
     assert.match((await response.json()).error, /origin is not allowed/);
     assert.equal(response.headers.get('access-control-allow-origin'), null);
 });
+
+test('permanent pairing works on client listener and disconnect revokes only this bearer',async t=>{
+ const {store,baseUrl}=await startServer(t),origin='https://uvu.example';
+ assert.equal(typeof store.createPermanentPairCode,'function');
+ const {code}=await store.createPermanentPairCode();
+ async function pair(name){const r=await fetch(baseUrl+'/v1/client/pair',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({code,device:{name}})});assert.equal(r.status,200);return r.json();}
+ const a=await pair('Phone A'),b=await pair('Phone B');
+ assert.equal(a.device.name,'Phone A');assert.equal(a.device.id===b.device.id,false);
+ const headers={Origin:origin,Authorization:'Bearer '+a.token};
+ const session=await fetch(baseUrl+'/v1/client/session',{headers});assert.equal(session.status,200);assert.equal((await session.json()).device.name,'Phone A');
+ const originalSession=store.getSession;store.getSession=async()=>{throw new Error('disk full');};
+ assert.equal((await fetch(baseUrl+'/v1/client/session',{headers})).status,503);
+ assert.equal(store.isAuthorized(a.token),true);store.getSession=originalSession;
+ const originalClaim=store.claimPair;store.claimPair=async()=>{throw new Error('disk full');};
+ for(let i=0;i<9;i++)assert.equal((await fetch(baseUrl+'/v1/client/pair',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({code})})).status,503);
+ store.claimPair=originalClaim;
+ const revoke=await fetch(baseUrl+'/v1/client/revoke',{method:'POST',headers});assert.equal(revoke.status,200);
+ assert.equal(store.isAuthorized(a.token),false);assert.equal(store.isAuthorized(b.token),true);
+ const sessionAgain=await fetch(baseUrl+'/v1/client/session',{headers});assert.equal(sessionAgain.status,401);
+ const hidden=await fetch(baseUrl+'/v1/ui/pairing',{headers:{Origin:origin,Authorization:'Bearer '+b.token}});assert.equal(hidden.status,404);
+});

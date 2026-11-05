@@ -37,3 +37,15 @@ test('disconnect clears local credentials only after the server confirms revocat
     await assert.rejects(client.disconnect(), /offline/);
     assert.equal(JSON.parse(storage.getItem('uvu-story-bridge.v1')).token, 'still-valid');
 });
+
+test('client records device metadata, accepts permanent codes and isolates endpoint credentials',async()=>{
+ const {UvUStoryBridgeClient}=await import('../client/uvu-bridge-client.js');
+ const storage=new MemoryStorage(),calls=[];
+ const client=new UvUStoryBridgeClient({baseUrl:'http://127.0.0.1:8765/api/plugins/uvu-story-bridge',storage,fetchImpl:async(url,options)=>{calls.push({url,options});return {ok:true,json:async()=>({token:'device-token',paired:true,device:{id:'a',name:'Phone'}})};}});
+ await client.pair('A'.repeat(32),'Phone');
+ assert.equal(JSON.parse(calls[0].options.body).device.name,'Phone');
+ assert.equal(JSON.parse(storage.getItem('uvu-story-bridge.v1')).device.id,'a');
+ await client.getSession();
+ client.baseUrl='http://127.0.0.1:9999';
+ await assert.rejects(client.getState('a'),/地址|绑定/);assert.equal(calls.length,2);
+});

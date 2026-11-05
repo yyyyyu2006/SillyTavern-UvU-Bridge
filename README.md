@@ -78,3 +78,13 @@ Update both the UI extension and `plugins/uvu-story-bridge`, restart Tavern norm
 - Scene boundaries use a verified source anchor; removing earlier messages cannot silently shift export. Missing/edited/ambiguous anchors stop export. Legacy scenes without anchors must be ended without export before starting a new scene; source chat remains available.
 - Only derived copies are filtered. Base prompts, character cards and other extension prompts are unchanged. Selected memory has a visible 12000-character budget, with bounded excerpts and an actual-injection preview.
 - Background browser suspension can delay delivery; foreground polling resumes from persisted cursors. Physical Android/iOS behavior still requires device verification.
+
+## 0.4.1 permanent pairing
+
+In Tavern expand **永久配对与已绑定设备**, generate a permanent code, then paste it into UvU's pairing field and give the browser a device name. The 32-character random code is reusable until reset; the server stores only its hash and shows the plaintext only when generating it. Refreshing loses the displayed plaintext, not the code's validity. Reset if forgotten. The five-minute one-time code remains available.
+
+Each pairing creates an independent device token; existing legacy tokens survive the upgrade and additional pairings. Resetting the permanent code affects new pairing only. Revoke one device or confirm revoke-all separately; these preserve original chats, approved memory and the permanent code. At most 50 new device credentials are retained; remove unused devices before adding more. Do not distribute your permanent code.
+
+UvU stores its credential in the current browser, retries transient failures while visible with bounded backoff, and stops automatic retries after 401. Closing the page or restarting Tavern does not remove the binding. Clearing site data or deleting server data does. A changed bridge endpoint requires a fresh pairing and never receives the old credential. Browser suspension can delay retries. Multiple credentials share the local relay and directory; separate UvU databases are not merged.
+
+Update both extension and server to 0.4.1, restart Tavern normally and refresh both pages. Original prompt assembly and model-generation code are unchanged in this release.

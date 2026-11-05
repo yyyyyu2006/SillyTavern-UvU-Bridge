@@ -59,3 +59,11 @@ Service, inbox and event-list responses include a persistent `relayId`. A change
 `handoff_receipt` is a SillyTavern-to-UvU event containing `handoffId`, `archiveId`, expected, seen, retained, reviewed, deleted, pendingParts, incomplete and at. It acknowledges receiver state after a confirmed save, and does not enter chat or memory context.
 
 `GET /ui/extension-state` and `PUT /ui/extension-state {revision,settings}` are same-origin Tavern routes using its CSRF/authenticated account. They are not exposed on the client listener. PUT rejects stale revisions with 409. Extension state is atomically stored separately from the relay queue, so individual events do not clone the full review library. A failed or uncertain save is not acknowledged as received.
+
+## 0.4.1 pairing and device credentials
+
+Pairing accepts `{code,device?:{name}}` and returns `{token,paired:true,device}` on both client transports. Old callers may ignore additive metadata. Permanent codes are 24 random bytes encoded as 32 base64url characters, hashed at rest and reusable until rotation. One-time codes remain single-use with five-minute TTL, and each successful pair creates a distinct credential. Legacy tokenHash continues to authorize and is listed as legacy.
+
+Same-origin loopback UI routes: GET `/ui/pairing` returns mode, hasPermanent, createdAt and sanitized devices; PUT `/ui/pairing {mode}` selects temporary/permanent (permanent requires a generated code); POST `/ui/permanent-code` rotates and enables permanent mode and returns plaintext once; POST `/ui/revoke-device {id}` revokes one; POST `/ui/revoke-all` revokes all credentials, preserving the pairing code. Existing Tavern authentication and CSRF middleware apply. No management route exists on the separate client listener.
+
+GET `/client/session` verifies the bearer and returns sanitized device identity, binding time and recent session check time (persisted at most once a minute per device). POST `/client/revoke` revokes only its bearer, never other devices. Permanent-code reset does not revoke issued tokens. The relay and character directory remain shared by devices; credential separation does not merge or namespace separate UvU databases.

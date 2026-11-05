@@ -142,16 +142,30 @@ function attachRoutes(router) {
         const pair = store.createPairCode();
         res.json(pair);
     });
+    router.get(`${ROUTE_PREFIX}/ui/pairing`, localUi, (_req, res) => res.json({...store.getPairing(),devices:store.listDevices()}));
+    router.put(`${ROUTE_PREFIX}/ui/pairing`, localUi, async (req, res) => {
+        try { res.json(await store.setPairingMode(req.body?.mode)); }
+        catch(error) { sendError(res,400,error.message); }
+    });
+    router.post(`${ROUTE_PREFIX}/ui/permanent-code`, localUi, async (_req, res) => {
+        try { res.json(await store.createPermanentPairCode()); } catch(error) { sendError(res,500,'Permanent code could not be saved.'); }
+    });
+    router.post(`${ROUTE_PREFIX}/ui/revoke-device`, localUi, async (req, res) => {
+        try { await store.revokeDevice(req.body?.id);res.json({ok:true}); } catch(error) { sendError(res,400,error.message); }
+    });
+    router.post(`${ROUTE_PREFIX}/ui/revoke-all`, localUi, async (_req, res) => {
+        try { await store.revokeAllDevices();res.json({ok:true}); } catch(error) { sendError(res,500,'Device bindings could not be revoked.'); }
+    });
 
     router.post(`${ROUTE_PREFIX}/client/pair`, rateLimitPair, async (req, res) => {
         if (bodySize(req) > 2048) return sendError(res, 413, 'Request is too large.');
         try {
-            const token = await store.claimPair(req.body?.code);
+            const token = await store.claimPair(req.body?.code, req.body?.device);
             pairFailures.delete(String(req.ip || req.socket?.remoteAddress || 'unknown'));
-            return res.json({ token });
-        } catch {
-            countPairFailure(req);
-            return sendError(res, 401, 'Pair code is invalid, expired, or already used.');
+            return res.json({ token, ...(await store.getSession(token)) });
+        } catch (error) {
+            if (error.status === 401) countPairFailure(req);
+            return sendError(res, error.status || 503, error.status ? error.message : 'Pairing could not be saved. Please retry after checking server storage.');
         }
     });
 
@@ -161,6 +175,9 @@ function attachRoutes(router) {
     router.put(`${ROUTE_PREFIX}/ui/state`, localUi, async (req, res) => {
         try { res.json(await store.setMode(req.body)); }
         catch (error) { sendError(res, 400, error.message); }
+    });
+    router.get(`${ROUTE_PREFIX}/client/session`, requireClient, async (req, res) => {
+        try { res.json(await store.getSession(tokenFrom(req))); } catch(error) { sendError(res,error.status || 503,error.status ? error.message : 'Session could not be refreshed. Binding has not been revoked.'); }
     });
     router.get(`${ROUTE_PREFIX}/client/state`, requireClient, (req, res) => {
         res.json(store.getMode(req.query?.characterKey));
@@ -202,7 +219,7 @@ function attachRoutes(router) {
     router.post(`${ROUTE_PREFIX}/client/events`, requireClient, append('uvu'));
     router.post(`${ROUTE_PREFIX}/client/ack`, requireClient, ack('uvu'));
     router.post(`${ROUTE_PREFIX}/client/revoke`, requireClient, async (req, res) => {
-        await store.revokeToken();
+        await store.revokeToken(tokenFrom(req));
         res.json({ ok: true });
     });
 }

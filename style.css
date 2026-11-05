@@ -25,3 +25,7 @@
 .uvu-bridge-panel ol { padding-left: 22px; line-height: 1.6; }
 .uvu-bridge-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
 .uvu-bridge-panel [data-version], .uvu-bridge-panel [data-pair-expiry] { font-size: 12px; opacity: .8; }
+.uvu-bridge-panel .uvu-bridge-secret { display: block; min-width: 0; max-width: 100%; overflow-wrap: anywhere; user-select: all; letter-spacing: .02em; font-size: 13px; padding: 5px 0; }
+.uvu-bridge-panel [data-device-list] { max-height: 220px; overflow-y: auto; }
+.uvu-bridge-panel .uvu-bridge-device { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 6px 0; }
+.uvu-bridge-panel .uvu-bridge-device span { flex: 1 1 150px; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }

@@ -82,17 +82,21 @@ function createClientHttpServer({ store, loadConfig }) {
                 }
                 const body = await readJson(req, 2048);
                 try {
-                    const pairedToken = await store.claimPair(body?.code);
+                    const pairedToken = await store.claimPair(body?.code, body?.device);
                     pairFailures.delete(ip);
-                    return send(res, 200, { token: pairedToken }, origin);
-                } catch {
-                    pairFailures.set(ip, !failures || now - failures.startedAt >= 60_000
+                    return send(res, 200, { token: pairedToken, ...(await store.getSession(pairedToken)) }, origin);
+                } catch (error) {
+                    if (error.status === 401) pairFailures.set(ip, !failures || now - failures.startedAt >= 60_000
                         ? { startedAt: now, count: 1 }
                         : { ...failures, count: failures.count + 1 });
-                    return send(res, 401, { error: 'Pair code is invalid, expired, or already used.' }, origin);
+                    return send(res, error.status || 503, { error: error.status ? error.message : 'Pairing could not be saved. Please retry after checking server storage.' }, origin);
                 }
             }
 
+            if (pathname === `${ROUTE_PREFIX}session` && req.method === 'GET') {
+                try { return send(res, 200, await store.getSession(token), origin); }
+                catch (error) { return send(res, error.status || 503, {error:error.status ? error.message : 'Session could not be refreshed. Binding has not been revoked.'}, origin); }
+            }
             if (pathname === `${ROUTE_PREFIX}service` && req.method === 'GET') {
                 return send(res, 200, store.getService(), origin);
             }
@@ -128,7 +132,7 @@ function createClientHttpServer({ store, loadConfig }) {
                 catch (error) { return send(res, 400, { error: error.message }, origin); }
             }
             if (pathname === `${ROUTE_PREFIX}revoke` && req.method === 'POST') {
-                await store.revokeToken();
+                await store.revokeToken(token);
                 return send(res, 200, { ok: true }, origin);
             }
             return send(res, 404, { error: 'Bridge route not found.' }, origin);

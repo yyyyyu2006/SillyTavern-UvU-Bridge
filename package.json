@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-uvu-bridge",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": false,
   "description": "Local memory and scene bridge between UvU and SillyTavern",
   "main": "server/index.js",
