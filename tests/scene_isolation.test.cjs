@@ -123,3 +123,36 @@ test('an acknowledgement failure cannot leave an obsolete approved prompt inject
     await f.api.pollEvents();
     assert.equal(f.prompts.get('uvu-story-bridge-continuity'),'');
 });
+
+test('manual refresh recovers an empty local list behind a stale saved cursor using the real relay queue', async () => {
+    const store=createBridgeStore();
+    await store.appendEvent({source:'uvu',eventId:'sent',characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id:'one',text:'RECOVERED',createdAt:1}]}},'uvu');
+    const f=fixture(async raw=>{
+        const url=new URL(raw,'http://localhost');
+        const result=url.pathname.endsWith('/ui/events')?store.listEvents('sillytavern',url.searchParams.get('after'),100,'uvu-a'):url.pathname.endsWith('/csrf-token')?{token:'csrf'}:store.getMode('uvu-a');
+        return {ok:true,json:async()=>result};
+    });
+    f.settings.cursorByCharacter['uvu-a']=99;
+    f.settings.packetsByCharacter['uvu-a']={sourceArchiveId:'archive-a',items:[]};
+    const result=await f.api.pollEvents({manual:true});
+    assert.equal(result.received,1); assert.equal(result.total,1);
+    assert.equal(f.settings.cursorByCharacter['uvu-a'],1);
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].text,'RECOVERED');
+    assert.equal(f.api.memoryPrompt('uvu-a'),'');
+});
+
+test('manual replay preserves approved edits and deletion markers without duplicating received messages', async () => {
+    const store=createBridgeStore();
+    for (const id of ['one','deleted']) await store.appendEvent({source:'uvu',eventId:id,characterKey:'uvu-a',kind:'memory_packet',payload:{archiveId:'archive-a',messages:[{id,text:'SOURCE_'+id}]}},'uvu');
+    const f=fixture(async raw=>{
+        const url=new URL(raw,'http://localhost');
+        return {ok:true,json:async()=>url.pathname.endsWith('/ui/events')?store.listEvents('sillytavern',url.searchParams.get('after'),100,'uvu-a'):url.pathname.endsWith('/csrf-token')?{token:'csrf'}:store.getMode('uvu-a')};
+    });
+    const data=f.settings.packetsByCharacter['uvu-a'];
+    data.items=[{eventId:'archive-a:one',archiveId:'archive-a',text:'APPROVED_EDIT',sourceText:'SOURCE_one',selected:true,reviewed:true}];
+    data.deletedEventIds=['archive-a:deleted']; f.settings.cursorByCharacter['uvu-a']=2;
+    await f.api.pollEvents({manual:true});
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items.length,1);
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].text,'APPROVED_EDIT');
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].selected,true);
+});
