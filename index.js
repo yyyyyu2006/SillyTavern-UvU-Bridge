@@ -5,7 +5,7 @@ import { extension_prompt_types } from '../../../../script.js';
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const EXTENSION_VERSION = '0.3.4';
+const EXTENSION_VERSION = '0.3.5';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
@@ -232,10 +232,21 @@ async function pollEvents(options = {}) {
         next.pendingMessageParts = next.pendingMessageParts || {};
         const deleted = new Set(next.deletedEventIds || []);
         let nextCursor = options.manual ? 0 : cursor, received = 0, deletedSkipped = 0, filtered = 0;
+        let latestHandoffSeq = options.manual ? 0 : Number(next.latestHandoff?.seq || 0);
         for (const event of result.events || []) {
             nextCursor = Math.max(nextCursor, Number(event.seq) || 0);
             if (!['memory_packet', 'phone_exchange'].includes(event.kind)) continue;
             const payload = event.payload || {};
+            if (payload.archiveId) {
+                next.archiveInfo = next.archiveInfo || {};
+                const archiveId = String(payload.archiveId);
+                next.archiveInfo[archiveId] = { name: String(payload.archiveName || next.archiveInfo[archiveId]?.name || '').slice(0, 160) };
+                const handoff = payload.handoff;
+                if (handoff && typeof handoff.id === 'string' && Number.isInteger(handoff.start) && Number.isInteger(handoff.end) && handoff.start > 0 && handoff.end >= handoff.start && Number(event.seq) >= latestHandoffSeq) {
+                    latestHandoffSeq = Number(event.seq);
+                    next.latestHandoff = { archiveId, id: handoff.id, seq: Number(event.seq), at: Number(handoff.at) || event.createdAt, start: handoff.start, end: handoff.end, count: Number(handoff.count) || 0, totalMessages: Number(handoff.totalMessages) || 0, latestMessageAt: Number(handoff.latestMessageAt) || 0 };
+                }
+            }
             const records = Array.isArray(payload.messages) ? payload.messages : [{ id: event.eventId, text: payload.text || payload.summary, createdAt: event.createdAt }];
             for (const record of records) {
                 const sourceId = String(record.sourceMessageId || record.id || event.eventId);
@@ -267,10 +278,11 @@ async function pollEvents(options = {}) {
             try { await context.saveSettingsDebounced(); }
             catch (error) { settings().packetsByCharacter[key] = previous; settings().cursorByCharacter[key] = cursor; throw error; }
         }
+        if (options.manual && next.latestHandoff?.archiveId) reviewArchives.set(JSON.stringify([identity, key]), next.latestHandoff.archiveId);
         updatePrompt(); renderOnlineReview();
         if (nextCursor > 0 && (nextCursor > cursor || options.manual)) await request('/ui/ack', { method: 'POST', body: { seq: nextCursor, characterKey: key } });
         if (received) showStatus('收到 ' + received + ' 条在线剧情，请在下方审核勾选后应用。');
-        return { received, total: items.filter(item => (item.archiveId || '') === (next.sourceArchiveId || '')).length, allTotal: items.length, deletedSkipped, filtered, pendingParts: Object.keys(next.pendingMessageParts).length, gapDetected: result.gapDetected, more };
+        return { received, total: items.filter(item => (item.archiveId || '') === (next.sourceArchiveId || '')).length, reviewArchiveId: reviewArchiveId(key, next), reviewTotal: items.filter(item => (item.archiveId || '') === reviewArchiveId(key, next)).length, allTotal: items.length, deletedSkipped, filtered, pendingParts: Object.keys(next.pendingMessageParts).length, gapDetected: result.gapDetected, more };
     } catch (error) { if (options.manual) throw error; showStatus(error.message, true); }
     finally { pollBusy = false; }
 }
@@ -339,19 +351,20 @@ function renderOnlineReview() {
     const key = activeUvuKey(), data = settings().packetsByCharacter[key] || { items: [] };
     const scene = settings().scene?.characterKey === key ? settings().scene : null;
     const archiveId = reviewArchiveId(key, data), identity = chatIdentity();
-    const signature = JSON.stringify([identity, key, archiveId, data.sourceArchiveId, data.items, data.mode, data.sceneId, data.enabled, settings().bridgeEnabled, settings().injectMemory, scene]);
+    const signature = JSON.stringify([identity, key, archiveId, data.sourceArchiveId, data.items, data.archiveInfo, data.latestHandoff, data.mode, data.sceneId, data.enabled, settings().bridgeEnabled, settings().injectMemory, scene]);
     if (host.dataset.signature === signature) return;
     host.dataset.signature = signature;
     host.replaceChildren();
     const archiveIds = [...new Set((data.items || []).map(item => item.archiveId || ''))];
     if (data.sourceArchiveId && !archiveIds.includes(data.sourceArchiveId)) archiveIds.push(data.sourceArchiveId);
     if (archiveId && !archiveIds.includes(archiveId)) archiveIds.push(archiveId);
+    for (const id of Object.keys(data.archiveInfo || {})) if (!archiveIds.includes(id)) archiveIds.push(id);
     const draft = reviewDraft(key, data, archiveId);
     const label = document.createElement('label'); label.textContent = '正在查看 / 审核的 UvU 存档';
     const select = document.createElement('select');
     for (const id of archiveIds) {
         const count = (data.items || []).filter(item => (item.archiveId || '') === id).length;
-        select.add(new Option(`${id || '旧版未标注存档'} · ${count} 条`, id));
+        select.add(new Option(`${data.archiveInfo?.[id]?.name ? data.archiveInfo[id].name + ' · ' : ''}${id || '旧版未标注存档'} · ${count} 条${data.latestHandoff?.archiveId === id ? ' · 最近交接' : ''}`, id));
     }
     if (archiveIds.length && !archiveIds.includes(archiveId)) {
         const option = new Option('请选择已收取的来源存档', '');
@@ -373,6 +386,11 @@ function renderOnlineReview() {
         renderOnlineReview();
     });
     label.append(select); host.append(label);
+    if (data.latestHandoff) {
+        const latest = data.latestHandoff, receipt = document.createElement('p'); receipt.className = 'uvu-bridge-help';
+        receipt.textContent = `当前交接：${data.archiveInfo?.[latest.archiveId]?.name || '未命名存档'}（${latest.archiveId}） · 消息 ${latest.start}–${latest.end} / 当时共 ${latest.totalMessages} 条 · ${latest.count} 条正文 · 交接时间 ${new Date(latest.at).toLocaleString()}。此处显示最近已交接的存档；UvU 切换或新增聊天后须重新交接再刷新。`;
+        host.append(receipt);
+    }
     const sourceNotice = document.createElement('p'); sourceNotice.className = 'uvu-bridge-help';
     sourceNotice.textContent = scene
         ? `本场记忆来源：${scene.uvuArchiveId || '未指定'}（已锁定）。可查看和审核其他存档，但不会将它们注入本场或改变导出目标。`
@@ -493,6 +511,7 @@ async function startScene() {
     if (!characterKey) throw new Error('先从角色下拉列表选择对应的 UvU 角色。');
     if (!settings().uvuCharacters?.some(character => character.id === characterKey)) throw new Error('当前绑定 ID 不在 UvU 角色目录中。请先在 UvU 连接页重新配对或刷新角色列表，再选择正确角色。');
     const packets = settings().packetsByCharacter[characterKey] || {};
+    if (reviewArchiveId(characterKey, packets) !== (packets.sourceArchiveId || '')) throw new Error('正在查看的存档与下场来源不同，请先点“设为下场记忆来源”再开始，避免使用旧存档。');
     if (!packets.sourceArchiveId) throw new Error('请先从 UvU 交接线上剧情，并在此选择来源存档后开始。');
     const draft = { id: crypto.randomUUID(), characterKey, stCharacterKey: activeStKey(),
         uvuArchiveId: packets.sourceArchiveId || '', chatId: String(context.getCurrentChatId?.() || context.chatId || ''), startIndex: context.chat.length, startedAt: Date.now() };
@@ -643,7 +662,7 @@ function renderPanel() {
             <p>按钮说明：“刷新 UvU 角色”只读取目录；“生成配对码”生成五分钟有效的六位码；“开始线下剧情”锁定角色、聊天和来源存档并记录起点；“继续本场”恢复暂停的原场景；“拿出手机”允许 UvU 回复；“收起手机”让剧情继续留在酒馆；“结束并导出”发送剧情副本给 UvU 审核；“结束空场 / 放弃本场导出”恢复线上并撤回未审核草稿。两边不会自动复制人设或互相调用回复 API。</p>
             <ol><li><strong>先配对设备：</strong>打开 UvU“设置 → 酒馆互通”，保持本页在前台；在本扩展点“生成配对码”，把 6 位码填入 UvU 并点“连接 / 配对”。首次连接按浏览器提示允许访问本机网络；状态变成“已配对”才算完成。</li>
             <li><strong>核对角色：</strong>在酒馆打开目标角色的私聊，不要停留在群聊；从“绑定到 UvU 角色”选择对应角色，检查面板显示的酒馆角色名和 UvU 角色名/ID。人设、用户设定和头像不会自动复制，两边仍各自维护。</li>
-            <li><strong>把线上背景交给酒馆：</strong>在 UvU“酒馆互通”选角色、当前存档及消息起止编号，点“交接所选范围”。手动交接会重新发送所选范围，消息编号从 1 开始；默认取最近 50 条有效正文，也可自选编号。回酒馆展开“线上记忆审核”并点“刷新线上存档”，在存档下拉框选来源存档（显示存档 ID 和已接收条数）；0 条代表该存档没有接收副本，刷新不会恢复已删除副本。下拉框仅切换查看与审核，本场进行中也可使用，不会改变当前剧情。要换下场记忆来源，先结束并导出或放弃本场，再选择存档并点“设为下场记忆来源”，然后开始新场景。再展开每条记录核对、编辑或勾选，最后点“保存勾选与编辑”。刷新只读取已经交接的副本，不读取 UvU 尚未发送的聊天；新内容默认预选最近 50 条，未保存不注入，已审核的选择保留。原文更新后须重新审核。展开记录可“删除这条”，或点“删除勾选副本”；仅删除接收副本，刷新不会恢复，两边原聊天保留。</li>
+            <li><strong>把线上背景交给酒馆：</strong>在 UvU“酒馆互通”选角色、当前存档及消息起止编号，点“交接所选范围”。手动交接会重新发送所选范围，消息编号从 1 开始；默认取最近 50 条有效正文，也可自选编号。回酒馆展开“线上记忆审核”并点“刷新线上存档”，刷新优先展示最近一次手动交接的存档，显示名称、ID、范围和交接时间；UvU 切换存档或新增消息后须重新点“交接所选范围”，再回此刷新。也可在下拉框查看其他来源存档；0 条代表该存档没有接收副本，刷新不会恢复已删除副本。下拉框仅切换查看与审核，本场进行中也可使用，不会改变当前剧情。要换下场记忆来源，先结束并导出或放弃本场，再选择存档并点“设为下场记忆来源”，然后开始新场景。再展开每条记录核对、编辑或勾选，最后点“保存勾选与编辑”。刷新只读取已经交接的副本，不读取 UvU 尚未发送的聊天；新内容默认预选最近 50 条，未保存不注入，已审核的选择保留。原文更新后须重新审核。展开记录可“删除这条”，或点“删除勾选副本”；仅删除接收副本，刷新不会恢复，两边原聊天保留。</li>
             <li><strong>开启记忆：</strong>勾选“在线记忆加入酒馆线下上下文”。仅当前绑定角色、当前来源存档中已勾选的记录可进入线下/手机模式的扩展记忆；取消勾选会暂停注入，但保留已审核记录。</li>
             <li><strong>开始线下剧情：</strong>确认仍在正确的酒馆私聊，点“开始线下剧情”，再回聊天框手动输入开场并发送。按钮只切换模式、记录起点，不会自动跳转角色或生成消息。</li>
             <li><strong>临时使用手机：</strong>线下剧情中点“拿出手机”，UvU 用自己的 API 正常回复；点“收起手机”后，后续剧情继续留在酒馆。酒馆旁白不会自动变成 UvU 消息，需要明确拿出手机并在 UvU 聊天。</li>
@@ -704,7 +723,7 @@ function renderPanel() {
                 const result = await pollEvents({ manual: true });
                 if (result) {
                     const details = [result.deletedSkipped ? `有 ${result.deletedSkipped} 个消息记录/分段因手动删除标记被跳过，刷新不会恢复删除副本。` : '', result.pendingParts ? `有 ${result.pendingParts} 条消息分段尚未收齐，请在 UvU 重新交接。` : '', result.filtered ? `有 ${result.filtered} 个记录过滤后没有正文。` : '', result.gapDetected ? '队列较早记录已不完整，本次仅恢复仍保留的内容；请在 UvU 重新交接所需范围。' : '', result.more ? '队列较长，仍有后续记录，请再次刷新。' : '', result.allTotal > result.total ? `其他来源存档还有 ${result.allTotal - result.total} 条，可直接在下拉框切换查看与审核；不会更改本场记忆来源。` : ''].filter(Boolean).join(' ');
-                    showStatus(`刷新完成：新增或更新 ${result.received} 条；当前来源存档共 ${result.total} 条，全部来源共 ${result.allTotal} 条。待审勾选与编辑已保留，请核对后保存。${details || (result.allTotal ? '' : '桥接队列暂未找到可用正文；请在 UvU 再点“交接所选范围”，本次会重新发送旧正文，再回这里刷新。')}`, Boolean(result.gapDetected || result.pendingParts));
+                    showStatus(`刷新完成：新增或更新 ${result.received} 条；正在查看存档共 ${result.reviewTotal} 条，本场 / 下场来源共 ${result.total} 条，全部来源共 ${result.allTotal} 条。待审勾选与编辑已保留，请核对后保存。${details || (result.allTotal ? '' : '桥接队列暂未找到可用正文；请在 UvU 再点“交接所选范围”，本次会重新发送旧正文，再回这里刷新。')}`, Boolean(result.gapDetected || result.pendingParts));
                 }
             }
             if (action === 'resume-scene') { const scene = settings().scene; sceneIdentity(scene); if (settings().bridgeEnabled === false) throw new Error('请先启用总开关'); await setSceneMode('offline', scene); scene.suspended = false; await context.saveSettingsDebounced(); updatePrompt(); showStatus('已继续原场景。'); }

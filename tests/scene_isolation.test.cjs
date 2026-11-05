@@ -8,10 +8,10 @@ function fixture(fetchImpl) {
         setExtensionPrompt: (key, value) => prompts.set(key, value), saveSettingsDebounced: async () => {} };
     const sandbox = vm.createContext({ getContext: () => context, extension_prompt_types: { IN_PROMPT: 0 },
         document: { readyState: 'loading', visibilityState: 'visible', addEventListener() {} }, console, structuredClone, AbortController, AbortSignal,
-        setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, fetch: fetchImpl || (async () => ({ ok: true, json: async () => ({ token: 'csrf', enabled: true }) })) });
+        setTimeout, clearTimeout, crypto: require('node:crypto').webcrypto, setInterval: () => 1, clearInterval() {}, fetch: fetchImpl || (async () => ({ ok: true, json: async () => ({ token: 'csrf', enabled: true }) })) });
     const source = fs.readFileSync(require.resolve('../index.js'), 'utf8').split('\n').filter(line => !line.startsWith('import ')).join('\n');
     vm.runInContext(fs.readFileSync(require.resolve('../story-text.js'), 'utf8'), sandbox);
-    vm.runInContext(source + '\ncontext=getContext(); globalThis.api={settings,updatePrompt,memoryPrompt,pollEvents,applyEnabled,invalidateRequests,request,reviewDraft,deleteReceivedItems,saveReview,renderOnlineReview};', sandbox);
+    vm.runInContext(source + '\ncontext=getContext(); globalThis.api={settings,updatePrompt,memoryPrompt,pollEvents,applyEnabled,invalidateRequests,request,reviewDraft,deleteReceivedItems,saveReview,renderOnlineReview,startScene};', sandbox);
     const settings = sandbox.api.settings();
     Object.assign(settings, { bridgeEnabled: true, injectMemory: true, characterLinks: { 'character:card.png': 'uvu-a' },
         cursorByCharacter: {}, packetsByCharacter: { 'uvu-a': { mode: 'offline', sceneId: 'scene-a', sourceArchiveId: 'archive-a', items: [
@@ -305,4 +305,62 @@ test('preview distinguishes inspected archive from actual injection and clears f
     f.context.chatId='chat-b'; f.api.renderOnlineReview();
     preview=host.children.find(child=>child.tagName==='details').children[1].text;
     assert.doesNotMatch(preview,/SAVED_MEMORY|OTHER_ARCHIVE/);
+});
+
+function archiveEvent(seq, archiveId, text, handoff) {
+    return {seq,characterKey:'uvu-a',kind:'memory_packet',createdAt:seq,payload:{archiveId,archiveName:archiveId==='archive-b'?'当前分支':'主存档',messages:[{id:'same',text,createdAt:seq}],...(handoff?{handoff}:{} )}};
+}
+
+test('starting a scene cannot silently use an old source while reviewing a different archive', async () => {
+    const f=fixture(),host=reviewDom(f); f.settings.scene=null;
+    f.context.chat=[];
+    f.settings.uvuCharacters=[{id:'uvu-a',name:'A'}];
+    await chooseReview(f,host,'archive-b');
+    await assert.rejects(f.api.startScene(),/设为下场记忆来源/);
+    assert.equal(f.settings.scene,null);
+});
+
+test('manual refresh browses latest explicit handoff archive, keeps scene pinned and shows receipt identity', async () => {
+    const events=[archiveEvent(1,'archive-a','OLD'),archiveEvent(2,'archive-b','CURRENT',{id:'handoff-b',at:100,start:20,end:30,count:1,totalMessages:30,latestMessageAt:2})];
+    const f=fixture(async url=>({ok:true,json:async()=>url.endsWith('/csrf-token')?{token:'csrf'}:url.includes('/ui/events?')?{events}:{mode:'offline',sceneId:'scene-a',enabled:true}})),host=reviewDom(f);
+    const result=await f.api.pollEvents({manual:true});
+    assert.equal(host.children.find(child=>child.tagName==='label').children[0].value,'archive-b');
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].sourceArchiveId,'archive-a');
+    assert.equal(f.settings.scene.uvuArchiveId,'archive-a');
+    assert.equal(result.reviewArchiveId,'archive-b');
+    assert.equal(result.reviewTotal,2);
+    assert.match(host.children.map(child=>child.text||'').join(' '),/当前交接.*当前分支.*20–30/);
+    const texts=f.settings.packetsByCharacter['uvu-a'].items.filter(item=>item.eventId.endsWith(':same'));
+    assert.equal(texts.length,2);
+    assert.match(f.prompts.get('uvu-story-bridge-continuity'),/SAVED_MEMORY/);
+    assert.doesNotMatch(f.prompts.get('uvu-story-bridge-continuity'),/CURRENT/);
+});
+
+test('tombstoned current transfer remains identifiable without restoring deleted records', async () => {
+    const events=[archiveEvent(3,'archive-b','DELETED',{id:'h',at:100,start:1,end:1,count:1,totalMessages:1,latestMessageAt:3})];
+    const f=fixture(async url=>({ok:true,json:async()=>url.endsWith('/csrf-token')?{token:'csrf'}:url.includes('/ui/events?')?{events}:{mode:'offline',sceneId:'scene-a',enabled:true}})),host=reviewDom(f);
+    f.settings.packetsByCharacter['uvu-a'].deletedEventIds=['archive-b:same'];
+    const result=await f.api.pollEvents({manual:true});
+    assert.equal(result.deletedSkipped,1); assert.equal(result.reviewArchiveId,'archive-b');
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].items.some(item=>item.eventId==='archive-b:same'),false);
+    assert.match(host.children.map(child=>child.text||'').join(' '),/当前交接.*当前分支/);
+});
+
+test('background handoff receipt does not interrupt archive browsing or untouched active drafts', async () => {
+    const events=[archiveEvent(2,'archive-b','CURRENT',{id:'h',at:100,start:1,end:1,count:1,totalMessages:1,latestMessageAt:2})];
+    const f=fixture(async url=>({ok:true,json:async()=>url.endsWith('/csrf-token')?{token:'csrf'}:url.includes('/ui/events?')?{events}:{mode:'offline',sceneId:'scene-a',enabled:true}})),host=reviewDom(f);
+    f.api.renderOnlineReview(); const draft=f.api.reviewDraft('uvu-a',f.settings.packetsByCharacter['uvu-a']);
+    draft.one.text='UNSAVED_A'; draft.one.touched=true;
+    await f.api.pollEvents();
+    assert.equal(host.children.find(child=>child.tagName==='label').children[0].value,'archive-a');
+    assert.equal(f.api.reviewDraft('uvu-a',f.settings.packetsByCharacter['uvu-a']).one.text,'UNSAVED_A');
+});
+
+test('manual replay after relay reinstall replaces stale handoff sequence metadata', async () => {
+    const events=[archiveEvent(1,'archive-b','CURRENT',{id:'new-relay',at:200,start:1,end:1,count:1,totalMessages:1})];
+    const f=fixture(async url=>({ok:true,json:async()=>url.endsWith('/csrf-token')?{token:'csrf'}:url.includes('/ui/events?')?{events}:{mode:'offline',sceneId:'scene-a',enabled:true}}));
+    f.settings.packetsByCharacter['uvu-a'].latestHandoff={archiveId:'archive-a',id:'old-relay',seq:100};
+    const result=await f.api.pollEvents({manual:true});
+    assert.equal(result.reviewArchiveId,'archive-b');
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].latestHandoff.id,'new-relay');
 });
