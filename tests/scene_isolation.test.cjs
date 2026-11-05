@@ -11,15 +11,94 @@ function fixture(fetchImpl) {
         setTimeout, clearTimeout, setInterval: () => 1, clearInterval() {}, fetch: fetchImpl || (async () => ({ ok: true, json: async () => ({ token: 'csrf', enabled: true }) })) });
     const source = fs.readFileSync(require.resolve('../index.js'), 'utf8').split('\n').filter(line => !line.startsWith('import ')).join('\n');
     vm.runInContext(fs.readFileSync(require.resolve('../story-text.js'), 'utf8'), sandbox);
-    vm.runInContext(source + '\ncontext=getContext(); globalThis.api={settings,updatePrompt,memoryPrompt,pollEvents,applyEnabled,invalidateRequests,request,reviewDraft,deleteReceivedItems,saveReview};', sandbox);
+    vm.runInContext(source + '\ncontext=getContext(); globalThis.api={settings,updatePrompt,memoryPrompt,pollEvents,applyEnabled,invalidateRequests,request,reviewDraft,deleteReceivedItems,saveReview,renderOnlineReview};', sandbox);
     const settings = sandbox.api.settings();
     Object.assign(settings, { bridgeEnabled: true, injectMemory: true, characterLinks: { 'character:card.png': 'uvu-a' },
         cursorByCharacter: {}, packetsByCharacter: { 'uvu-a': { mode: 'offline', sceneId: 'scene-a', sourceArchiveId: 'archive-a', items: [
             { eventId: 'one', archiveId: 'archive-a', selected: true, text: 'SAVED_MEMORY' },
             { eventId: 'two', archiveId: 'archive-b', selected: true, text: 'OTHER_ARCHIVE' } ] } },
         scene: { id: 'scene-a', stCharacterKey: 'character:card.png', characterKey: 'uvu-a', chatId: 'chat-a', uvuArchiveId: 'archive-a' } });
-    return { api: sandbox.api, context, settings, prompts };
+    return { api: sandbox.api, context, settings, prompts, sandbox };
 }
+
+function reviewDom(f) {
+    function element(tagName) {
+        return { tagName, children: [], dataset: {}, className: '', disabled: false, value: '', listeners: {},
+            append(...children) { this.children.push(...children); },
+            add(child) { this.children.push(child); },
+            replaceChildren() { this.children = []; },
+            addEventListener(name, callback) { this.listeners[name] = callback; },
+            set textContent(value) { this.text = value; this.children = []; },
+            get textContent() { return this.text || ''; } };
+    }
+    const host = element('host');
+    f.sandbox.document.createElement = tagName => element(tagName);
+    f.sandbox.document.createTextNode = text => ({ tagName: '#text', text });
+    f.sandbox.Option = function (label, value) { return Object.assign(element('option'), { text: label, value }); };
+    f.sandbox.testPanel = { querySelector: selector => selector === '[data-online-review]' ? host : null };
+    vm.runInContext('panel = testPanel', f.sandbox);
+    return host;
+}
+
+test('online review keeps an archive selector visible when refresh has no received messages', () => {
+    const f = fixture();
+    f.settings.packetsByCharacter['uvu-a'] = { items: [] };
+    const host = reviewDom(f);
+    f.api.renderOnlineReview();
+    const label = host.children.find(child => child.tagName === 'label');
+    assert.ok(label, 'archive selector label should remain visible');
+    assert.equal(label.children[0].tagName, 'select');
+    assert.equal(label.children[0].disabled, true);
+    assert.match(host.children.map(child => child.text || '').join(' '), /尚未收到在线剧情/);
+});
+
+test('online review explains and disables archive changes during the matching scene', () => {
+    const f = fixture();
+    const host = reviewDom(f);
+    f.api.renderOnlineReview();
+    const label = host.children.find(child => child.tagName === 'label');
+    assert.equal(label.children[0].disabled, true);
+    assert.match(host.children.map(child => child.text || '').join(' '), /本场来源存档已锁定/);
+});
+
+test('ending a scene unlocks archive selection even when no messages changed', () => {
+    const f = fixture(), host = reviewDom(f);
+    f.api.renderOnlineReview();
+    f.settings.scene = null;
+    f.api.renderOnlineReview();
+    const select = host.children.find(child => child.tagName === 'label').children[0];
+    assert.equal(select.disabled, false);
+    assert.doesNotMatch(host.children.map(child => child.text || '').join(' '), /本场来源存档已锁定/);
+});
+
+test('a source whose copies were deleted stays visible beside other available archives', async () => {
+    const f = fixture(), host = reviewDom(f);
+    f.settings.scene = null;
+    f.settings.packetsByCharacter['uvu-a'].sourceArchiveId = 'deleted-archive';
+    f.api.renderOnlineReview();
+    const select = host.children.find(child => child.tagName === 'label').children[0];
+    assert.equal(select.value, 'deleted-archive');
+    assert.ok(select.children.some(option => option.value === select.value));
+    assert.match(select.children.find(option => option.value === select.value).text, /0 条/);
+    assert.equal(select.disabled, false);
+    select.value = 'archive-b';
+    await select.listeners.change();
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].sourceArchiveId, 'archive-b');
+    assert.match(f.api.memoryPrompt('uvu-a'), /OTHER_ARCHIVE/);
+    assert.doesNotMatch(f.api.memoryPrompt('uvu-a'), /SAVED_MEMORY/);
+});
+
+test('archive selection rolls back when persistence fails', async () => {
+    const f = fixture(), host = reviewDom(f);
+    f.settings.scene = null;
+    f.context.saveSettingsDebounced = async () => { throw new Error('quota'); };
+    f.api.renderOnlineReview();
+    const select = host.children.find(child => child.tagName === 'label').children[0];
+    select.value = 'archive-b';
+    await select.listeners.change();
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].sourceArchiveId, 'archive-a');
+    assert.equal(select.value, 'archive-a');
+});
 test('only this extension prompt is written and only for the exact scene/chat/archive', () => {
     const f = fixture();
     f.api.updatePrompt(); assert.match(f.prompts.get('uvu-story-bridge-continuity'), /SAVED_MEMORY/);

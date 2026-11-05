@@ -5,7 +5,7 @@ import { extension_prompt_types } from '../../../../script.js';
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const EXTENSION_VERSION = '0.3.2';
+const EXTENSION_VERSION = '0.3.3';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
@@ -332,16 +332,32 @@ function renderOnlineReview() {
     const host = panel?.querySelector('[data-online-review]');
     if (!host) return;
     const key = activeUvuKey(), data = settings().packetsByCharacter[key] || { items: [] };
-    const signature = JSON.stringify([key, data.sourceArchiveId, data.items, settings().injectMemory]);
+    const sceneLocked = settings().scene?.characterKey === key;
+    const signature = JSON.stringify([chatIdentity(), key, data.sourceArchiveId, data.items, settings().injectMemory, sceneLocked]);
     if (host.dataset.signature === signature) return;
     host.dataset.signature = signature;
     host.replaceChildren();
-    if (!data.items?.length) { host.textContent = '尚未收到在线剧情。请先在 UvU 交接所需聊天范围。'; return; }
+    const archiveIds = [...new Set((data.items || []).map(item => item.archiveId || ''))];
+    if (data.sourceArchiveId && !archiveIds.includes(data.sourceArchiveId)) archiveIds.push(data.sourceArchiveId);
     const draft = reviewDraft(key, data);
     const label = document.createElement('label'); label.textContent = '本场使用的 UvU 存档';
     const select = document.createElement('select');
-    for (const id of [...new Set(data.items.map(item => item.archiveId || ''))]) select.add(new Option(id || '旧版未标注存档', id));
+    for (const id of archiveIds) {
+        const count = (data.items || []).filter(item => (item.archiveId || '') === id).length;
+        select.add(new Option(`${id || '旧版未标注存档'} · ${count} 条`, id));
+    }
+    if (archiveIds.length && !archiveIds.includes(data.sourceArchiveId || '')) {
+        const option = new Option('请选择已收取的来源存档', '');
+        option.disabled = true;
+        select.add(option);
+    }
+    if (!archiveIds.length) {
+        const option = new Option('暂无已收取存档', '');
+        option.disabled = true;
+        select.add(option);
+    }
     select.value = data.sourceArchiveId || '';
+    select.disabled = !archiveIds.length || sceneLocked;
     select.addEventListener('change', async () => {
         const current = settings().packetsByCharacter[key];
         if (activeUvuKey() !== key || !current) return;
@@ -353,6 +369,22 @@ function renderOnlineReview() {
         finally { reviewMutationBusy = false; }
     });
     label.append(select); host.append(label);
+    if (sceneLocked) {
+        const lockNotice = document.createElement('p'); lockNotice.className = 'uvu-bridge-help';
+        lockNotice.textContent = '本场来源存档已锁定；结束本场后才能切换，避免剧情串档。';
+        host.append(lockNotice);
+    }
+    if (!data.items?.length) {
+        const empty = document.createElement('p'); empty.className = 'uvu-bridge-help';
+        empty.textContent = '尚未收到在线剧情。请先在 UvU 交接所需聊天范围，再点“刷新线上存档”；有收到消息后才能选择来源存档。';
+        host.append(empty);
+        return;
+    }
+    if (!data.items.some(item => (item.archiveId || '') === (data.sourceArchiveId || ''))) {
+        const empty = document.createElement('p'); empty.className = 'uvu-bridge-help';
+        empty.textContent = '当前来源存档没有接收副本；其他存档仍有记录，可在上方切换。已删除的副本不会通过刷新恢复。';
+        host.append(empty);
+    }
     const list = document.createElement('div'); list.className = 'uvu-bridge-review-list';
     data.items.forEach(item => {
         if ((item.archiveId || '') !== (data.sourceArchiveId || '')) return;
@@ -586,7 +618,7 @@ function renderPanel() {
             <p>按钮说明：“刷新 UvU 角色”只读取目录；“生成配对码”生成五分钟有效的六位码；“开始线下剧情”锁定角色、聊天和来源存档并记录起点；“继续本场”恢复暂停的原场景；“拿出手机”允许 UvU 回复；“收起手机”让剧情继续留在酒馆；“结束并导出”发送剧情副本给 UvU 审核；“结束空场 / 放弃本场导出”恢复线上并撤回未审核草稿。两边不会自动复制人设或互相调用回复 API。</p>
             <ol><li><strong>先配对设备：</strong>打开 UvU“设置 → 酒馆互通”，保持本页在前台；在本扩展点“生成配对码”，把 6 位码填入 UvU 并点“连接 / 配对”。首次连接按浏览器提示允许访问本机网络；状态变成“已配对”才算完成。</li>
             <li><strong>核对角色：</strong>在酒馆打开目标角色的私聊，不要停留在群聊；从“绑定到 UvU 角色”选择对应角色，检查面板显示的酒馆角色名和 UvU 角色名/ID。人设、用户设定和头像不会自动复制，两边仍各自维护。</li>
-            <li><strong>把线上背景交给酒馆：</strong>在 UvU“酒馆互通”选角色、当前存档及消息起止编号，点“交接所选范围”。手动交接会重新发送所选范围，消息编号从 1 开始；默认取最近 50 条有效正文，也可自选编号。回酒馆展开“线上记忆审核”并点“刷新线上存档”，在存档下拉框选来源存档，再展开每条记录核对、编辑或勾选，最后点“保存勾选与编辑”。刷新只读取已经交接的副本，不读取 UvU 尚未发送的聊天；新内容默认预选最近 50 条，未保存不注入，已审核的选择保留。原文更新后须重新审核。展开记录可“删除这条”，或点“删除勾选副本”；仅删除接收副本，刷新不会恢复，两边原聊天保留。</li>
+            <li><strong>把线上背景交给酒馆：</strong>在 UvU“酒馆互通”选角色、当前存档及消息起止编号，点“交接所选范围”。手动交接会重新发送所选范围，消息编号从 1 开始；默认取最近 50 条有效正文，也可自选编号。回酒馆展开“线上记忆审核”并点“刷新线上存档”，在存档下拉框选来源存档（显示存档 ID 和已接收条数）；0 条代表该存档没有接收副本，刷新不会恢复已删除副本。本场进行中来源存档锁定，请先结束并导出或放弃本场，再切换存档。再展开每条记录核对、编辑或勾选，最后点“保存勾选与编辑”。刷新只读取已经交接的副本，不读取 UvU 尚未发送的聊天；新内容默认预选最近 50 条，未保存不注入，已审核的选择保留。原文更新后须重新审核。展开记录可“删除这条”，或点“删除勾选副本”；仅删除接收副本，刷新不会恢复，两边原聊天保留。</li>
             <li><strong>开启记忆：</strong>勾选“在线记忆加入酒馆线下上下文”。仅当前绑定角色、当前来源存档中已勾选的记录可进入线下/手机模式的扩展记忆；取消勾选会暂停注入，但保留已审核记录。</li>
             <li><strong>开始线下剧情：</strong>确认仍在正确的酒馆私聊，点“开始线下剧情”，再回聊天框手动输入开场并发送。按钮只切换模式、记录起点，不会自动跳转角色或生成消息。</li>
             <li><strong>临时使用手机：</strong>线下剧情中点“拿出手机”，UvU 用自己的 API 正常回复；点“收起手机”后，后续剧情继续留在酒馆。酒馆旁白不会自动变成 UvU 消息，需要明确拿出手机并在 UvU 聊天。</li>
@@ -670,7 +702,7 @@ function renderPanel() {
             }
             if (action === 'end-scene') await endScene();
         } catch (error) { showStatus(`${button.textContent.trim()}失败：${error.message}`, true); }
-        finally { actionBusy = false; button.disabled = false; }
+        finally { actionBusy = false; button.disabled = false; renderOnlineReview(); }
     });
     const help = { 'refresh-online': '从队列起点重新读取线上副本，保留待审编辑；核对后须保存才可注入', 'refresh-characters': '读取已配对 UvU 的角色目录，不复制人设', pair: '生成五分钟内有效的一次性码', 'start-scene': '锁定当前角色、聊天、来源存档并记录起点；手动发送开场', 'resume-scene': '总开关重开后恢复原场景，须回原聊天', 'phone-mode': '允许本场角色在 UvU 用自己的 API 回复', 'close-phone': '关闭 UvU 手机通道，剧情继续在酒馆', 'end-scene': '过滤并导出本场剧情，回 UvU 审核后加入日记', 'cancel-scene': '恢复线上、撤回未审核草稿，保留原聊天', 'check-version': '检查扩展、服务端和公开仓库版本，不自动安装' };
     for (const button of panel.querySelectorAll('[data-action]')) button.title = help[button.dataset.action] || '';
