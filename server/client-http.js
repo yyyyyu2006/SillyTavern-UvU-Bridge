@@ -93,6 +93,12 @@ function createClientHttpServer({ store, loadConfig }) {
                 }
             }
 
+            if (pathname === `${ROUTE_PREFIX}service` && req.method === 'GET') {
+                return send(res, 200, store.getService(), origin);
+            }
+            if (pathname === `${ROUTE_PREFIX}inbox` && req.method === 'GET') {
+                return send(res, 200, store.inbox('uvu'), origin);
+            }
             if (pathname === `${ROUTE_PREFIX}state` && req.method === 'GET') {
                 return send(res, 200, store.getMode(url.searchParams.get('characterKey')), origin);
             }

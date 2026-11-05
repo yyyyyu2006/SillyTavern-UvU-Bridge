@@ -53,6 +53,14 @@ test('loopback client API handles preflight and pairing without disabling Tavern
     });
     assert.equal(mode.status, 200);
     assert.equal((await mode.json()).mode, 'offline');
+    await store.setEnabled(false);
+    const service = await fetch(`${baseUrl}/v1/client/service`, { headers: { Origin: origin, Authorization: `Bearer ${token}` } });
+    const info = await service.json();
+    assert.equal(info.enabled, false); assert.equal(info.version, '0.3.0'); assert.equal(info.protocolVersion, 1);
+    const disabledMode = await fetch(`${baseUrl}/v1/client/state?characterKey=char-1`, { headers: { Origin: origin, Authorization: `Bearer ${token}` } });
+    assert.equal((await disabledMode.json()).mode, 'online');
+    const inbox = await fetch(`${baseUrl}/v1/client/inbox`, { headers: { Origin: origin, Authorization: `Bearer ${token}` } });
+    assert.deepEqual((await inbox.json()).characters, []);
 });
 
 test('loopback client API rejects origins outside the plugin allowlist', async t => {

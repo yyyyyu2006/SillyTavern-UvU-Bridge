@@ -4,12 +4,12 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
-const EVENT_KINDS = new Set(['memory_packet', 'phone_exchange', 'scene_transcript', 'scene_summary']);
+const EVENT_KINDS = new Set(['memory_packet', 'phone_exchange', 'scene_transcript', 'scene_summary', 'scene_cancelled']);
 const MODES = new Set(['online', 'offline', 'phone']);
 const SOURCES = new Set(['uvu', 'sillytavern']);
 
 function emptyState() {
-    return { version: 1, nextSeq: 1, events: [], cursors: {}, gaps: {}, modes: {}, characters: [], tokenHash: null };
+    return { version: 1, enabled: true, nextSeq: 1, events: [], cursors: {}, gaps: {}, modes: {}, characters: [], tokenHash: null };
 }
 
 function digest(value) {
@@ -166,6 +166,13 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         return { events, latestSeq, gapDetected: cursor < gapSeq, cursor: events.at(-1)?.seq || latestSeq };
     }
 
+    function inbox(target) {
+        if (!SOURCES.has(target)) throw new Error('Invalid event target');
+        const latest = new Map();
+        for (const event of state.events) if (event.target === target) latest.set(event.characterKey, event.seq);
+        return { characters: [...latest].map(([characterKey, latestSeq]) => ({ characterKey, latestSeq })) };
+    }
+
     async function acknowledge(target, seq, characterKey = '') {
         if (!SOURCES.has(target)) throw new Error('Invalid acknowledgement target');
         const cursor = Math.max(0, Math.floor(Number(seq) || 0));
@@ -178,7 +185,20 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
 
     function getMode(characterKey) {
         const value = state.modes[String(characterKey || '')];
-        return value ? { ...value } : { mode: 'online', characterKey: String(characterKey || ''), sceneId: '', updatedAt: 0 };
+        const result = value ? { ...value } : { mode: 'online', characterKey: String(characterKey || ''), sceneId: '', archiveId: '', updatedAt: 0 };
+        return { ...result, mode: state.enabled === false ? 'online' : result.mode, enabled: state.enabled !== false };
+    }
+
+    function getService() { return { enabled: state.enabled !== false, ...require('./version.js') }; }
+
+    async function setEnabled(enabled) {
+        if (typeof enabled !== 'boolean') throw new Error('Invalid enabled flag');
+        return mutate(() => {
+            state.enabled = enabled;
+            // Re-enabling never resumes an old scene without an explicit UI action.
+            for (const key of Object.keys(state.modes)) state.modes[key] = { ...state.modes[key], mode: 'online', updatedAt: now() };
+            return getService();
+        });
     }
 
     function listCharacters() {
@@ -206,14 +226,15 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         const mode = String(input?.mode || '');
         if (!characterKey || characterKey.length > 200) throw new Error('Invalid characterKey');
         if (!MODES.has(mode)) throw new Error('Invalid mode');
-        const value = { characterKey, mode, sceneId: String(input.sceneId || '').slice(0, 160), updatedAt: now() };
+        const value = { characterKey, mode, sceneId: String(input.sceneId || '').slice(0, 160), archiveId: String(input.archiveId || '').slice(0, 200), updatedAt: now() };
         return mutate(() => {
+            if (state.enabled === false && mode !== 'online') throw new Error('Bridge service is disabled');
             state.modes[characterKey] = value;
             return { ...value };
         });
     }
 
-    return { load, createPairCode, claimPair, isAuthorized, hasPairedClient, revokeToken, appendEvent, listEvents, acknowledge, getMode, setMode, listCharacters, setCharacters };
+    return { load, createPairCode, claimPair, isAuthorized, hasPairedClient, revokeToken, appendEvent, listEvents, inbox, acknowledge, getMode, setMode, getService, setEnabled, listCharacters, setCharacters };
 }
 
 module.exports = { createBridgeStore, validateEvent, EVENT_KINDS, MODES, SOURCES };

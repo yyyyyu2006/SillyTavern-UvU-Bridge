@@ -118,8 +118,15 @@ function attachRoutes(router) {
     clientCors(router);
 
     router.get(`${ROUTE_PREFIX}/health`, localUi, async (req, res) => {
-        res.json({ ok: true, paired: store.hasPairedClient(), version: '0.2.0' });
+        res.json({ ok: true, paired: store.hasPairedClient(), ...store.getService() });
     });
+    router.get(`${ROUTE_PREFIX}/ui/service`, localUi, (_req, res) => res.json(store.getService()));
+    router.put(`${ROUTE_PREFIX}/ui/service`, localUi, async (req, res) => {
+        try { res.json(await store.setEnabled(req.body?.enabled)); }
+        catch (error) { sendError(res, 400, error.message); }
+    });
+    router.get(`${ROUTE_PREFIX}/client/service`, requireClient, (_req, res) => res.json(store.getService()));
+    router.get(`${ROUTE_PREFIX}/client/inbox`, requireClient, (_req, res) => res.json(store.inbox('uvu')));
 
     router.get(`${ROUTE_PREFIX}/ui/pair-code`, localUi, (req, res) => {
         const pair = store.createPairCode();
@@ -195,7 +202,7 @@ module.exports = {
         id: 'uvu-story-bridge',
         name: 'UvU Story Bridge',
         description: 'Authenticated local event and memory relay for UvU.',
-        version: '0.2.0',
+        version: require('./version.js').version,
     },
     async init(router) {
         if (!initialized) {

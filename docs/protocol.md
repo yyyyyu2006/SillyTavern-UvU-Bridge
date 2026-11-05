@@ -38,10 +38,16 @@ The server plugin never calls an LLM. UvU keeps using its existing API and promp
 
 ## Mode and memory lifecycle
 
-- `online`: UvU replies normally. Completed turns can be relayed as `memory_packet` records for the mapped SillyTavern character.
+- `online`: UvU replies normally. Only an explicit range handoff relays `memory_packet`; ordinary unrelated turns are not automatically copied.
 - `offline`: UvU checks this state before a private-chat generation and does not request a reply.
 - `phone`: UvU may reply; its completed turn is tagged `phone_exchange`.
 - Ending a SillyTavern scene exports ordered `scene_transcript` parts. UvU stores a complete scene as a draft journal after all parts arrive and are saved. It is not favorited by default.
-- Enabling scene-memory injection in UvU favorites imported bridge journals. This uses the app's existing favorite-memory context path. No base prompt text or prompt assembly code is replaced.
+- UvU stores incoming scenes as unapproved drafts. The user must review, select and save the text; only approved, favorited entries passing the per-character injection switch are usable. The switch alone never approves a scene. No base prompt text is replaced.
+
+Version 0.3.0 adds `scene_cancelled`: discard incomplete parts and retract unapproved drafts for that scene, retaining source chats and already-approved journals. The idempotent cancellation event ID is `<sceneId>:cancel`. Existing event envelopes and protocol version 1 remain compatible; old clients should update to understand this event.
+
+`GET /ui/service`, `PUT /ui/service {enabled:boolean}` and authenticated `GET /client/service` expose the persistent master switch, server version and protocol version. Updating the switch resets effective modes to online; a retained scene requires explicit resume. Authenticated `GET /client/inbox` returns per-character latest sequence numbers without transcript content, allowing delivery independent of the currently open UvU chat. Both the main Tavern routes and separate loopback listener expose client service/inbox endpoints.
+
+State includes `archiveId`; nonmatching UvU archives ignore scene modes. Tavern injection also requires the exact stored scene ID, card key, chat ID and source archive, enabled service and reviewed selection. A chat change invalidates pending work and clears only this extension's continuity prompt.
 
 The sequence queue is a local relay, not a shared live transcript. Each side retains its own original conversation. A scene transcript is imported only after all declared parts are present; if the queue reports a gap, the client must not claim a complete import.
