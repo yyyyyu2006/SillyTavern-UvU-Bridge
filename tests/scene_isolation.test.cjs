@@ -52,53 +52,65 @@ test('online review keeps an archive selector visible when refresh has no receiv
     assert.match(host.children.map(child => child.text || '').join(' '), /尚未收到在线剧情/);
 });
 
-test('online review explains and disables archive changes during the matching scene', () => {
-    const f = fixture();
-    const host = reviewDom(f);
-    f.api.renderOnlineReview();
-    const label = host.children.find(child => child.tagName === 'label');
-    assert.equal(label.children[0].disabled, true);
-    assert.match(host.children.map(child => child.text || '').join(' '), /本场来源存档已锁定/);
-});
-
-test('ending a scene unlocks archive selection even when no messages changed', () => {
+test('active scene can browse and approve another archive without changing scene memory or destination', async () => {
     const f = fixture(), host = reviewDom(f);
-    f.api.renderOnlineReview();
-    f.settings.scene = null;
+    const data = f.settings.packetsByCharacter['uvu-a'];
+    data.items = [{eventId:'two',archiveId:'archive-b',text:'OTHER_ARCHIVE',selected:false}];
     f.api.renderOnlineReview();
     const select = host.children.find(child => child.tagName === 'label').children[0];
     assert.equal(select.disabled, false);
-    assert.doesNotMatch(host.children.map(child => child.text || '').join(' '), /本场来源存档已锁定/);
+    select.value = 'archive-b'; await select.listeners.change();
+    const list = host.children.find(child => child.className === 'uvu-bridge-review-list');
+    assert.equal(list.children.length, 1);
+    assert.equal(list.children[0].children[1].value, 'OTHER_ARCHIVE');
+    await f.api.saveReview('uvu-a','archive-b');
+    assert.equal(data.items[0].selected, true);
+    assert.equal(data.sourceArchiveId, 'archive-a');
+    assert.equal(f.settings.scene.uvuArchiveId, 'archive-a');
+    assert.equal(f.api.memoryPrompt('uvu-a'), '');
+    assert.equal(f.prompts.get('uvu-story-bridge-continuity'), '');
+    assert.match(host.children.map(child => child.text || '').join(' '), /本场记忆来源/);
 });
 
-test('a source whose copies were deleted stays visible beside other available archives', async () => {
+test('browsing alone never changes source; explicit next-scene selection is unavailable until scene ends', async () => {
     const f = fixture(), host = reviewDom(f);
-    f.settings.scene = null;
+    f.api.renderOnlineReview();
+    let select = host.children.find(child => child.tagName === 'label').children[0];
+    select.value = 'archive-b'; await select.listeners.change();
+    let source = host.children.find(child => child.dataset.sourceArchive !== undefined);
+    assert.equal(source.disabled, true);
+    f.settings.scene = null; f.api.renderOnlineReview();
+    source = host.children.find(child => child.dataset.sourceArchive !== undefined);
+    assert.equal(source.disabled, false);
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].sourceArchiveId, 'archive-a');
+    await source.listeners.click();
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].sourceArchiveId, 'archive-b');
+    assert.equal(f.prompts.get('uvu-story-bridge-continuity'), '');
+});
+
+test('a source whose copies were deleted stays visible and other archives can be reviewed', async () => {
+    const f = fixture(), host = reviewDom(f); f.settings.scene = null;
     f.settings.packetsByCharacter['uvu-a'].sourceArchiveId = 'deleted-archive';
     f.api.renderOnlineReview();
     const select = host.children.find(child => child.tagName === 'label').children[0];
     assert.equal(select.value, 'deleted-archive');
-    assert.ok(select.children.some(option => option.value === select.value));
     assert.match(select.children.find(option => option.value === select.value).text, /0 条/);
-    assert.equal(select.disabled, false);
-    select.value = 'archive-b';
-    await select.listeners.change();
-    assert.equal(f.settings.packetsByCharacter['uvu-a'].sourceArchiveId, 'archive-b');
-    assert.match(f.api.memoryPrompt('uvu-a'), /OTHER_ARCHIVE/);
-    assert.doesNotMatch(f.api.memoryPrompt('uvu-a'), /SAVED_MEMORY/);
+    select.value = 'archive-b'; await select.listeners.change();
+    assert.equal(f.settings.packetsByCharacter['uvu-a'].sourceArchiveId, 'deleted-archive');
+    assert.equal(host.children.find(child => child.className === 'uvu-bridge-review-list').children.length, 1);
 });
 
-test('archive selection rolls back when persistence fails', async () => {
-    const f = fixture(), host = reviewDom(f);
-    f.settings.scene = null;
+test('explicit source selection rolls back when persistence fails', async () => {
+    const f = fixture(), host = reviewDom(f); f.settings.scene = null;
     f.context.saveSettingsDebounced = async () => { throw new Error('quota'); };
     f.api.renderOnlineReview();
     const select = host.children.find(child => child.tagName === 'label').children[0];
-    select.value = 'archive-b';
-    await select.listeners.change();
+    select.value = 'archive-b'; await select.listeners.change();
+    const source = host.children.find(child => child.dataset.sourceArchive !== undefined);
+    await source.listeners.click();
     assert.equal(f.settings.packetsByCharacter['uvu-a'].sourceArchiveId, 'archive-a');
-    assert.equal(select.value, 'archive-a');
 });
+
 test('only this extension prompt is written and only for the exact scene/chat/archive', () => {
     const f = fixture();
     f.api.updatePrompt(); assert.match(f.prompts.get('uvu-story-bridge-continuity'), /SAVED_MEMORY/);
@@ -234,4 +246,63 @@ test('manual replay preserves approved edits and deletion markers without duplic
     assert.equal(f.settings.packetsByCharacter['uvu-a'].items.length,1);
     assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].text,'APPROVED_EDIT');
     assert.equal(f.settings.packetsByCharacter['uvu-a'].items[0].selected,true);
+});
+
+function chooseReview(f, host, id) {
+    f.api.renderOnlineReview();
+    const select = host.children.find(child => child.tagName === 'label').children[0];
+    select.value = id; return select.listeners.change();
+}
+
+test('browsing and edits survive refresh and chat switches without leaking drafts to other chats', async () => {
+    const f = fixture(async()=>({ok:true,json:async()=>({events:[],mode:'offline',sceneId:'scene-a',enabled:true})}));
+    const host = reviewDom(f), data = f.settings.packetsByCharacter['uvu-a'];
+    await chooseReview(f,host,'archive-b');
+    const draft = f.api.reviewDraft('uvu-a',data); draft.two.text='DRAFT_B'; draft.two.touched=true;
+    await f.api.pollEvents({manual:true});
+    assert.equal(host.children.find(child=>child.tagName==='label').children[0].value,'archive-b');
+    assert.equal(f.api.reviewDraft('uvu-a',data).two.text,'DRAFT_B');
+    f.context.chatId='chat-b'; f.api.renderOnlineReview();
+    assert.equal(host.children.find(child=>child.tagName==='label').children[0].value,'archive-a');
+    await chooseReview(f,host,'archive-b');
+    assert.equal(f.api.reviewDraft('uvu-a',data).two.text,'OTHER_ARCHIVE');
+    f.context.chatId='chat-a'; f.api.renderOnlineReview();
+    assert.equal(f.api.reviewDraft('uvu-a',data).two.text,'DRAFT_B');
+    assert.equal(f.settings.scene.uvuArchiveId,'archive-a');
+});
+
+test('deleting a browsed archive rolls back on failure and preserves source memory and tombstones on success', async () => {
+    const f=fixture(), host=reviewDom(f); await chooseReview(f,host,'archive-b');
+    const before=JSON.stringify(f.settings.packetsByCharacter['uvu-a']);
+    f.context.saveSettingsDebounced=async()=>{throw new Error('quota');};
+    await assert.rejects(f.api.deleteReceivedItems('uvu-a','archive-b',['two']),/quota/);
+    assert.equal(JSON.stringify(f.settings.packetsByCharacter['uvu-a']),before);
+    f.context.saveSettingsDebounced=async()=>{};
+    await f.api.deleteReceivedItems('uvu-a','archive-b',['two']);
+    const data=f.settings.packetsByCharacter['uvu-a'];
+    assert.equal(data.items.length,1); assert.equal(data.items[0].archiveId,'archive-a');
+    assert.equal(data.deletedEventIds[0],'two');
+    assert.match(f.prompts.get('uvu-story-bridge-continuity'),/SAVED_MEMORY/);
+    assert.equal(f.settings.scene.uvuArchiveId,'archive-a');
+});
+
+test('old review controls cannot save or delete after switching to another chat of the same character', async () => {
+    const f=fixture(), host=reviewDom(f); f.api.renderOnlineReview();
+    const list=host.children.find(child=>child.className==='uvu-bridge-review-list');
+    const remove=list.children[0].children[2];
+    const actions=host.children.find(child=>child.className==='uvu-bridge-row');
+    const before=JSON.stringify(f.settings.packetsByCharacter['uvu-a']);
+    f.sandbox.confirm=()=>true; f.context.chatId='chat-b';
+    await remove.listeners.click(); await actions.children[0].listeners.click();
+    assert.equal(JSON.stringify(f.settings.packetsByCharacter['uvu-a']),before);
+});
+
+test('preview distinguishes inspected archive from actual injection and clears for another chat', async () => {
+    const f=fixture(),host=reviewDom(f); await chooseReview(f,host,'archive-b');
+    let preview=host.children.find(child=>child.tagName==='details').children[1].text;
+    assert.match(preview,/SAVED_MEMORY/); assert.doesNotMatch(preview,/OTHER_ARCHIVE/);
+    assert.match(preview,/不属于本场来源/);
+    f.context.chatId='chat-b'; f.api.renderOnlineReview();
+    preview=host.children.find(child=>child.tagName==='details').children[1].text;
+    assert.doesNotMatch(preview,/SAVED_MEMORY|OTHER_ARCHIVE/);
 });
