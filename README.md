@@ -4,6 +4,8 @@ This project is a local, opt-in bridge between the UvU phone UI and SillyTavern.
 
 ## Current status
 
+Version 0.5.0 adds TauriTavern Host ABI 2 support, a private self-hostable HTTPS relay, and reviewed offline JSON exchange. See [TT/iOS installation, deployment and operation](docs/tt-deployment.md). The existing extension panel contains the same step-by-step TT tutorial and separate endpoint/admin credential fields. No public relay or bundled secret is provided; physical iPhone/iPad execution is not yet verified. Original Node Tavern installation below remains available.
+
 The repository includes the SillyTavern UI extension, local server plugin, protocol tests, and the reusable browser client at `client/uvu-bridge-client.js`. The matching UvU-side connection panel is maintained in the separate UvU app repository; users need a UvU deployment that includes that integration for end-to-end use.
 
 The repository contains both parts required by the bridge:

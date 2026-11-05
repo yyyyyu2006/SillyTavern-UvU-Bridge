@@ -1,4 +1,5 @@
 server/data/
 server/config.json
+server/relay-config.json
 node_modules/
 npm-debug.log*

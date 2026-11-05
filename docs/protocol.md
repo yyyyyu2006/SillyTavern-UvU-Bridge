@@ -1,5 +1,11 @@
 # Bridge protocol
 
+## 0.5.0 TT transport and files
+
+The private standalone `node server/relay.js` implements the existing v1 contract at an explicitly configured HTTPS base URL. `/v1/ui/*` and `/v1/health` require the instance administrator Bearer secret and exact `uiOrigins`; `/v1/client/*` require independently paired device Bearer credentials and exact `clientOrigins`, except the rate-limited pairing exchange. TT uses its official native extension store, so its UI state is not sent to a remote extension-state endpoint. The service is loopback-bound behind an HTTPS reverse proxy, single-user only, with rate/body/time limits and the existing atomic durable queue. Original Tavern routes and CSRF remain separate.
+
+Offline JSON uses `{format:'uvu-bridge-file',version:1,direction:'to-uvu'|'to-tavern',characterKey,archiveId,events}`. Events retain v1 envelopes; per-event character/archive must match the explicitly selected wrapper/import target. Scene `payload.uvuArchiveId` or memory/receipt `payload.archiveId` supplies the archive. Limits are 16 MiB UTF-8, 2000 events, 64 KiB/event and 48 KiB/payload. Scene parts require complete scene/floor order and a matching SHA-256 `partHash`; whole source floors and speaker/date metadata survive. Memory multipart messages must be complete. Direction-to-source mismatch, target mismatch, invalid metadata or checksum rejects before receive. File receipts and source IDs prevent duplicate imports, and file receive never advances a relay cursor or emits a live relay ACK. Review and explicit approval gates remain mandatory. File mode cannot signal another device's live mode. See `docs/tt-deployment.md` for exact private deployment and operating steps.
+
 The SillyTavern panel routes are mounted below `/api/plugins/uvu-story-bridge` and use SillyTavern's same-origin CSRF token. UvU client routes are served by a separate loopback-only listener on `127.0.0.1:<clientPort>` (default `8765`) so they do not bypass or disable SillyTavern's global CSRF protection. The browser client must send requests only after an explicit user gesture. Do not put bearer tokens in URLs.
 
 ## Event envelope

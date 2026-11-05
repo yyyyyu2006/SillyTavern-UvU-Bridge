@@ -18,6 +18,12 @@
 .uvu-bridge-panel output { min-width: 76px; font: 600 1.05em ui-monospace, monospace; letter-spacing: 0.12em; }
 .uvu-bridge-panel .uvu-bridge-help { margin: 0; opacity: 0.8; font-size: 0.85em; }
 .uvu-bridge-panel select { width: 100%; min-height: 38px; }
+.uvu-bridge-panel [data-tt-config] { border-top: 1px solid var(--SmartThemeBorderColor, #777); padding-top: 10px; display: grid; gap: 8px; min-width: 0; }
+.uvu-bridge-panel [data-tt-config][hidden] { display: none; }
+.uvu-bridge-panel input[type="url"], .uvu-bridge-panel input[type="password"], .uvu-bridge-panel input[type="file"] { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
+.uvu-bridge-panel code { overflow-wrap: anywhere; white-space: normal; }
+.uvu-bridge-panel [data-tt-config] h3 { font-size: 16px; line-height: 1.35; }
+.uvu-bridge-panel [data-tt-config] p, .uvu-bridge-panel [data-tt-config] li { overflow-wrap: anywhere; }
 
 .uvu-bridge-panel .uvu-bridge-review-list { max-height: 360px; overflow-y: auto; display: grid; gap: 8px; }
 .uvu-bridge-panel textarea { width: 100%; min-height: 100px; resize: vertical; }

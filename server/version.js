@@ -1,2 +1,2 @@
 'use strict';
-module.exports = { version: '0.4.2', protocolVersion: 1 };
+module.exports = { version: '0.5.0', protocolVersion: 1 };

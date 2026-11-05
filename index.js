@@ -1,11 +1,13 @@
 import './story-text.js';
+import './platform.js';
+import './bridge-file.js';
 import { getContext } from '../../../extensions.js';
 import { extension_prompt_types } from '../../../../script.js';
 
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const EXTENSION_VERSION = '0.4.2';
+const EXTENSION_VERSION = '0.5.0';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
@@ -23,6 +25,9 @@ const reviewDrafts = new Map();
 const reviewArchives = new Map();
 let generation = 0;
 const requests = new Set();
+let ttConnection = {mode: 'file', endpoint: '', adminSecret: ''};
+const isTT = () => globalThis.UvUBridgePlatform?.inspect().kind === 'tt';
+const isFileMode = () => isTT() && ttConnection.mode !== 'https';
 
 function invalidateRequests() {
     generation++;
@@ -45,6 +50,10 @@ let durableWrites = Promise.resolve();
 async function persistSettings() {
     const snapshot = structuredClone(settings());
     const operation = durableWrites.then(async () => {
+        if (isTT()) {
+            await globalThis.UvUBridgePlatform.saveState(snapshot);
+            return;
+        }
         let result;
         try { result = await request('/ui/extension-state', { method: 'PUT', body: { revision: durableRevision, settings: snapshot }, independent: true }); }
         catch(error) {
@@ -61,6 +70,13 @@ async function persistSettings() {
     return operation;
 }
 async function restoreSettings() {
+    if (isTT()) {
+        const stored = await globalThis.UvUBridgePlatform.loadState();
+        context.extensionSettings[SETTINGS_KEY] = {...structuredClone(DEFAULT_SETTINGS), ...(stored || {})};
+        settings().relayByCharacter ||= {};
+        if (!stored) await persistSettings();
+        return;
+    }
     const result = await request('/ui/extension-state', { independent: true });
     if (!Number.isInteger(result.revision)) throw new Error('服务端不支持可靠保存，请更新服务端并重启酒馆。');
     durableRevision = result.revision;
@@ -90,13 +106,13 @@ function updateLinkField() {
     const select = panel?.querySelector('[data-uvu-character]');
     if (!select) return;
     const key = activeUvuKey();
+    const selected = settings().uvuCharacters?.find(character => character.id === key);
     if (key && ![...select.options].some(option => option.value === key)) {
-        const legacy = new Option(`未在角色目录中：${key}`, key, true, true);
+        const legacy = new Option(selected ? `${selected.name}（${selected.id}）` : `未在角色目录中：${key}`, key, true, true);
         select.add(legacy);
     }
     select.value = key;
     const identity = panel.querySelector('[data-current-identity]');
-    const selected = settings().uvuCharacters?.find(character => character.id === key);
     if (identity) identity.textContent = `${currentStLabel()} → ${selected ? `${selected.name}（${selected.id}）` : key ? `未识别的 UvU ID：${key}` : '尚未绑定 UvU 角色'}`;
 }
 
@@ -122,13 +138,13 @@ async function refreshCharacterDirectory() {
 function messageAnchor(message) {
     return globalThis.UvUBridgeText.fingerprint(JSON.stringify([String(message?.mes || ''), Boolean(message?.is_user), String(message?.send_date || message?.timestamp || ''), String(message?.name || '')]));
 }
-function sceneMessages(scene) {
+function sceneMessages(scene, history = context.chat) {
     const boundary = scene.startBoundary;
     if (!boundary) throw new Error('旧场景缺少可靠起点，请先核对聊天并放弃本场后重新开始；原聊天保留。');
-    if (boundary.empty) return context.chat.slice();
-    const matches = context.chat.map((message, index) => messageAnchor(message) === boundary.anchor ? index : -1).filter(index => index >= 0);
+    if (boundary.empty) return history.slice();
+    const matches = history.map((message, index) => messageAnchor(message) === boundary.anchor ? index : -1).filter(index => index >= 0);
     if (matches.length !== 1) throw new Error('本场起点消息已删除、编辑或出现重复，无法安全判断导出范围；请保留聊天，重新开始本场。');
-    return context.chat.slice(matches[0] + 1);
+    return history.slice(matches[0] + 1);
 }
 
 function sceneText(messages) {
@@ -143,7 +159,7 @@ function sceneText(messages) {
     }).filter(Boolean).join('\n\n');
 }
 
-function sceneFloorParts(messages) {
+function sceneFloorParts(messages, history = context.chat) {
     context = getContext();
     const result = [];
     for (const [index, message] of messages.entries()) {
@@ -152,7 +168,7 @@ function sceneFloorParts(messages) {
         if (extracted.mode === 'malformed') throw new Error('第 ' + (index + 1) + ' 层正文标签未正确闭合，请检查原文或自定义正文标签；未开始导出。');
         if (!extracted.text) continue;
         const raw = message.send_date || message.timestamp, stamp = raw ? (Number(raw) || Date.parse(raw)) : NaN;
-        const floor = {id: 'floor-' + index, number: context.chat.indexOf(message) + 1,
+        const floor = {id: 'floor-' + index, number: history.indexOf(message) + 1,
             speaker: String(message.is_user ? context.name1 || 'User' : message.name || context.name2 || 'Character').slice(0, 120),
             role: message.is_user ? 'user' : 'assistant', createdAt: Number.isFinite(stamp) && stamp > 0 && stamp <= 8640000000000000 ? stamp : 0,
             extraction: extracted.mode, bodyTag: extracted.tag};
@@ -186,6 +202,7 @@ function sceneIdentity(scene) {
     context = getContext();
     if (!scene || scene.stCharacterKey !== activeStKey() || scene.characterKey !== activeUvuKey() ||
         scene.chatId !== String(context.getCurrentChatId?.() || context.chatId || '')) throw new Error('角色、绑定或聊天已切换，请返回本场剧情原来的聊天。');
+    if (isTT() && !globalThis.UvUBridgePlatform.sameRef(scene.chatRef,globalThis.UvUBridgePlatform.currentRef())) throw new Error('TT ChatRef 已改变，请返回本场原聊天。');
 }
 
 function splitSceneText(text, maxCodePoints = 8000) {
@@ -205,6 +222,7 @@ function splitSceneText(text, maxCodePoints = 8000) {
 }
 
 async function request(path, options = {}) {
+    if (isFileMode()) return fileRequest(path, options);
     const epoch = generation, controller = new AbortController(), independent = options.independent === true;
     if (!independent) requests.add(controller);
     const signal = controller.signal;
@@ -215,18 +233,23 @@ async function request(path, options = {}) {
     try {
     const method = String(options.method || 'GET').toUpperCase();
     const headers = { Accept: 'application/json', ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...options.headers };
-    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    if (isTT()) {
+        globalThis.UvUBridgePlatform.assertSupported();
+        if (!ttConnection.adminSecret || ttConnection.adminSecret.length < 32) throw new Error('请先保存 TT 中继地址与独立管理员密钥。');
+        headers.Authorization = 'Bearer ' + ttConnection.adminSecret;
+    } else if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
         const csrfResponse = await fetch('/csrf-token', { signal, credentials: 'same-origin', headers: { Accept: 'application/json' } });
         const csrf = await csrfResponse.json().catch(() => ({}));
         if (!csrfResponse.ok || !csrf.token) throw new Error('酒馆 CSRF 校验失败，请刷新酒馆页面后重试。');
         headers['X-CSRF-Token'] = csrf.token;
     }
     if (!independent && generation !== epoch) throw new Error('操作期间聊天或插件开关已改变，本次请求停止。');
-    const response = await fetch(`${API}${path}`, {
+    const response = await fetch(isTT() ? `${globalThis.UvUBridgePlatform.normalizeEndpoint(ttConnection.endpoint)}/v1${path}` : `${API}${path}`, {
         ...options,
         signal,
         method,
-        credentials: 'same-origin',
+        credentials: isTT() ? 'omit' : 'same-origin',
+        redirect: isTT() ? 'error' : 'follow',
         headers,
         body: options.body ? JSON.stringify(options.body) : undefined,
     });
@@ -282,12 +305,13 @@ function updatePrompt() {
     const scene = settings().scene;
     let matches = false;
     try { sceneIdentity(scene); matches = scene.uvuArchiveId === state?.sourceArchiveId && scene.id === state?.sceneId && !scene.suspended; } catch {}
-    const prompt = durableReady && settings().bridgeEnabled !== false && state?.enabled !== false && matches && (mode === 'offline' || mode === 'phone') ? memoryPrompt(key) : '';
+    const prompt = (!isTT() || globalThis.UvUBridgePlatform.inspect().canInject) && durableReady && settings().bridgeEnabled !== false && state?.enabled !== false && matches && (mode === 'offline' || mode === 'phone') ? memoryPrompt(key) : '';
     context.setExtensionPrompt(`${EXTENSION_ID}-continuity`, prompt, extension_prompt_types.IN_PROMPT, 0);
 }
 
 async function pollEvents(options = {}) {
     context = getContext();
+    if (isFileMode() && !options.manual) return;
     if (!durableReady) { if (options.manual) throw new Error('可靠存储尚未就绪，请重试连接存储。'); return; }
     if (settings().bridgeEnabled === false || !activeUvuKey()) { if (options.manual) throw new Error('请启用插件并绑定当前 UvU 角色。'); return; }
     if (pollBusy || reviewMutationBusy || sceneBusy || (actionBusy && !options.manual)) { if (options.manual) throw new Error('同步或保存正在进行，请稍候再刷新。'); return; }
@@ -302,7 +326,8 @@ async function pollEvents(options = {}) {
         // or a reinstalled server restarted sequence numbers below the saved cursor.
         let pageCursor = options.manual ? 0 : cursor;
         let more = false;
-        for (let page = 0; page < (options.manual ? 100 : 5); page++) {
+        if (options.fileEvents) result.events = options.fileEvents;
+        for (let page = 0; !options.fileEvents && page < (options.manual ? 100 : 5); page++) {
             const batch = await request('/ui/events?limit=100&after=' + pageCursor + '&characterKey=' + encodeURIComponent(key));
             if (epoch !== generation || settings().bridgeEnabled === false || chatIdentity() !== identity) return;
             if (!options.manual && ((batch.relayId && settings().relayByCharacter[key] && settings().relayByCharacter[key] !== batch.relayId) || (Number.isFinite(batch.latestSeq) && batch.latestSeq < cursor))) {
@@ -325,12 +350,12 @@ async function pollEvents(options = {}) {
         next.pendingMessageParts = next.pendingMessageParts || {};
         const deleted = new Set(next.deletedEventIds || []);
         const restoring = new Set(options.restoreIds || []), restored = new Set();
-        let nextCursor = options.manual ? 0 : cursor, received = 0, filtered = 0, invalid = 0, capacityReached = false;
+        let nextCursor = options.fileEvents ? cursor : options.manual ? 0 : cursor, received = 0, filtered = 0, invalid = 0, capacityReached = false;
         const deletedIds = new Set(), candidates = new Map(), transferMessages = new Map();
         next.rejectedEvents = next.rejectedEvents || [];
         let latestHandoffSeq = options.manual ? 0 : Number(next.latestHandoff?.seq || 0);
         for (const event of result.events || []) {
-            nextCursor = Math.max(nextCursor, Number(event.seq) || 0);
+            if (!options.fileEvents) nextCursor = Math.max(nextCursor, Number(event.seq) || 0);
             if (!['memory_packet', 'phone_exchange'].includes(event.kind)) continue;
             const payload = event.payload || {};
             if (payload.archiveId) {
@@ -406,9 +431,10 @@ async function pollEvents(options = {}) {
         }
         next.handoffReceipts = Object.fromEntries(Object.entries(next.handoffReceipts).slice(-30));
         next.receiveDiagnostics = {deletedSkipped, filtered, invalid, capacityReached, pendingParts: Object.keys(next.pendingMessageParts).length, at: Date.now()};
-        const mode = await request('/ui/state?characterKey=' + encodeURIComponent(key));
+        const mode = options.fileEvents ? {mode:previous.mode || 'online',sceneId:previous.sceneId || '',enabled:previous.enabled !== false} : await request('/ui/state?characterKey=' + encodeURIComponent(key));
         if (settings().bridgeEnabled === false || epoch !== generation || chatIdentity() !== identity || activeUvuKey() !== key) return;
         next.items = items; next.mode = mode.mode; next.sceneId = mode.sceneId; next.enabled = mode.enabled;
+        if (options.fileEvents && (invalid || capacityReached || Object.keys(next.pendingMessageParts).length > Object.keys(previous.pendingMessageParts || {}).length)) throw new Error('文件含无效、不完整消息或超过接收容量，整批未保存。');
         if (nextCursor !== cursor || (result.events || []).length || previous.mode !== mode.mode || previous.sceneId !== mode.sceneId || previous.enabled !== mode.enabled) {
             settings().packetsByCharacter[key] = next;
             settings().cursorByCharacter[key] = nextCursor;
@@ -419,8 +445,8 @@ async function pollEvents(options = {}) {
         }
         if (options.manual && next.latestHandoff?.archiveId) reviewArchives.set(JSON.stringify([identity, key]), next.latestHandoff.archiveId);
         updatePrompt(); renderOnlineReview();
-        if (nextCursor > 0 && (nextCursor > cursor || options.manual)) await request('/ui/ack', { method: 'POST', body: { seq: nextCursor, characterKey: key } });
-        if (transferMessages.size) await sendHandoffReceipts(key, [...transferMessages.keys()]).catch(error => showStatus('正文已保存，回执待重试：' + error.message, true));
+        if (!options.fileEvents && nextCursor > 0 && (nextCursor > cursor || options.manual)) await request('/ui/ack', { method: 'POST', body: { seq: nextCursor, characterKey: key } });
+        if (!options.fileEvents && transferMessages.size) await sendHandoffReceipts(key, [...transferMessages.keys()]).catch(error => showStatus('正文已保存，回执待重试：' + error.message, true));
         if (received) showStatus('收到 ' + received + ' 条在线剧情，请在下方审核勾选后应用。');
         return { received, total: items.filter(item => (item.archiveId || '') === (next.sourceArchiveId || '')).length, reviewArchiveId: reviewArchiveId(key, next), reviewTotal: items.filter(item => (item.archiveId || '') === reviewArchiveId(key, next)).length, allTotal: items.length, deletedSkipped, filtered, invalid, capacityReached, pendingParts: Object.keys(next.pendingMessageParts).length, gapDetected: result.gapDetected, more };
     } catch (error) { if (options.manual) throw error; showStatus(error.message, true); }
@@ -704,9 +730,17 @@ async function startScene() {
     const packets = settings().packetsByCharacter[characterKey] || {};
     if (reviewArchiveId(characterKey, packets) !== (packets.sourceArchiveId || '')) throw new Error('正在查看的存档与下场来源不同，请先点“设为下场记忆来源”再开始，避免使用旧存档。');
     if (!packets.sourceArchiveId) throw new Error('请先从 UvU 交接线上剧情，并在此选择来源存档后开始。');
-    const draft = { id: crypto.randomUUID(), characterKey, stCharacterKey: activeStKey(),
-        uvuArchiveId: packets.sourceArchiveId || '', chatId: String(context.getCurrentChatId?.() || context.chatId || ''), startIndex: context.chat.length, startBoundary: {empty: context.chat.length === 0, anchor: context.chat.length ? messageAnchor(context.chat.at(-1)) : ''}, startedAt: Date.now() };
     sceneBusy = true;
+    const epoch = generation, identity = chatIdentity();
+    let draft;
+    try {
+        const chatRef = isTT() ? globalThis.UvUBridgePlatform.currentRef() : null;
+        const history = isTT() ? await globalThis.UvUBridgePlatform.readHistory(context, chatRef) : context.chat;
+        if (epoch !== generation || identity !== chatIdentity() || characterKey !== activeUvuKey() || settings().bridgeEnabled === false) throw new Error('读取起点期间聊天或绑定已改变，请重试。');
+        draft = { id: crypto.randomUUID(), characterKey, stCharacterKey: activeStKey(),
+            uvuArchiveId: packets.sourceArchiveId || '', chatId: String(context.getCurrentChatId?.() || context.chatId || ''), ...(chatRef ? {chatRef} : {}),
+            startIndex: history.length, startBoundary: {empty: history.length === 0, anchor: history.length ? messageAnchor(history.at(-1)) : ''}, startedAt: Date.now() };
+    } catch(error) {sceneBusy=false;throw error;}
     settings().scene = draft;
     try { await setMode('offline'); await persistSettings(); }
     catch (error) { draft.suspended = true; await persistSettings(); updatePrompt(); throw error; }
@@ -724,8 +758,10 @@ async function endScene() {
     sceneBusy = true;
     try {
     if (!scene.exportParts) {
-        const messageEnd = context.chat.length;
-        const parts = sceneFloorParts(sceneMessages(scene));
+        const history = isTT() ? await globalThis.UvUBridgePlatform.readHistory(context, scene.chatRef) : context.chat;
+        sceneIdentity(scene);
+        const messageEnd = history.length;
+        const parts = sceneFloorParts(sceneMessages(scene, history), history);
         if (!parts.length) throw new Error('本场没有有效剧情，可点“结束空场”恢复线上。');
         const frozen = [];
         for (const item of parts) frozen.push({...item, partHash: await checksum(item.text)});
@@ -739,22 +775,96 @@ async function endScene() {
         scene.messageEnd = messageEnd;
         await persistSettings();
     }
+        const fileEvents=[];
         for (let index = 0; index < scene.exportParts.length; index++) {
             sceneIdentity(scene);
             if (epoch !== generation || settings().bridgeEnabled === false) throw new Error('导出已停止；回原聊天重试将续传冻结内容。');
             const item = scene.exportParts[index];
-            await request('/ui/events', { method: 'POST', body: {
+            const event = {
                 source: 'sillytavern', eventId: scene.id + ':transcript:' + (index + 1), kind: 'scene_transcript',
                 characterKey: scene.characterKey, sceneId: scene.id, createdAt: scene.startedAt,
                 payload: scenePartPayload(scene, item, index, scene.exportParts.length)
-            } });
+            };
+            if (isFileMode()) fileEvents.push(event);
+            else await request('/ui/events', { method: 'POST', body:event });
         }
+        if (fileEvents.length) await stageFileEvents(fileEvents);
         sceneIdentity(scene);
         if (epoch !== generation) throw new Error('场景已改变，保留导出供重试。');
         await setSceneMode('online', scene); settings().scene = null;
         try { await persistSettings(); } catch(error) { settings().scene = scene; updatePrompt(); throw error; }
         showStatus('导出完成。回 UvU“酒馆互通”审核剧情并逐条勾选；默认不进入上下文。');
     } finally { sceneBusy = false; }
+}
+
+async function fileRequest(path, options = {}) {
+    const [route,query=''] = path.split('?'), method = String(options.method || 'GET').toUpperCase();
+    const key = new URLSearchParams(query).get('characterKey') || options.body?.characterKey || '';
+    if (route === '/ui/service' || route === '/health') {
+        if (method === 'PUT') {
+            settings().bridgeEnabled = options.body?.enabled === true;
+            await persistSettings();
+        }
+        return {enabled:settings().bridgeEnabled !== false,relayId:'file-local',version:EXTENSION_VERSION,protocolVersion:1};
+    }
+    if (route === '/ui/characters') return {characters:settings().uvuCharacters || []};
+    if (route === '/ui/state') {
+        const data = settings().packetsByCharacter[key] ||= {items:[]};
+        if (method === 'PUT') {Object.assign(data,options.body);await persistSettings();}
+        return {mode:data.mode || 'online',sceneId:data.sceneId || '',enabled:settings().bridgeEnabled !== false};
+    }
+    if (route === '/ui/events' && method === 'GET') return {events:[],relayId:'file-local',gapDetected:false};
+    if (route === '/ui/events' && method === 'POST') {
+        const event=structuredClone(options.body);
+        if (!event.payload.uvuArchiveId && !event.payload.archiveId) event.payload.uvuArchiveId = settings().scene?.uvuArchiveId || '';
+        const duplicate=Boolean(settings().fileOutbox?.some(item=>item.eventId===event.eventId));
+        await stageFileEvents([event]);return {event,duplicate};
+    }
+    if (route === '/ui/ack') return {cursor:0};
+    throw new Error('文件模式没有在线配对或设备管理；请配置 HTTPS 中继后使用。');
+}
+
+async function stageFileEvents(events) {
+    const previous=settings().fileOutbox || [], next=structuredClone(previous);
+    for (const event of events) {
+        const existing=next.find(item=>item.eventId===event.eventId);
+        if (existing && JSON.stringify(existing)!==JSON.stringify(event)) throw new Error('文件交接事件 ID 内容冲突。');
+        if (!existing) next.push(structuredClone(event));
+    }
+    if (next.length>2000 || new TextEncoder().encode(JSON.stringify(next)).length>15*1024*1024) throw new Error('文件发件箱已满；先导出并清空已交接文件。');
+    if (next.length===previous.length) return;
+    settings().fileOutbox=next;
+    try {await persistSettings();} catch(error) {settings().fileOutbox=previous;throw error;}
+}
+
+async function importBridgeFile(text, characterKey, archiveId) {
+    if (!durableReady) throw new Error('可靠存储尚未就绪。');
+    if (!activeStKey() || context.groupId != null) throw new Error('请先打开对应角色的私聊。');
+    const epoch=generation,identity=chatIdentity(),previous=structuredClone(settings());
+    const file=await globalThis.UvUBridgeFile.validate(text,{direction:'to-tavern',characterKey,archiveId});
+    const receipt=await globalThis.UvUBridgeFile.hash(text);
+    if (epoch!==generation || identity!==chatIdentity()) throw new Error('校验期间聊天已切换，未导入。');
+    if (activeUvuKey() && activeUvuKey()!==characterKey) throw new Error('当前绑定与文件目标不一致，请先明确修改角色绑定。');
+    if (settings().fileReceipts?.includes(receipt)) return {duplicate:true};
+    try {
+        settings().characterLinks[activeStKey()] = characterKey;
+        settings().uvuCharacters ||= [];
+        if (!settings().uvuCharacters.some(item=>item.id===characterKey)) settings().uvuCharacters.push({id:characterKey,name:characterKey});
+        settings().fileTargetArchive=archiveId;
+        settings().fileReceipts=[...(settings().fileReceipts || []),receipt].slice(-100);
+        const result=await pollEvents({manual:true,fileEvents:file.events.map((event,index)=>({...event,seq:index+1}))});
+        if (!result) throw new Error('聊天已切换，未确认文件导入。');
+        updateLinkField();renderOnlineReview();
+        return {...result,duplicate:false};
+    } catch(error) {context.extensionSettings[SETTINGS_KEY]=previous;updatePrompt();throw error;}
+}
+
+async function exportBridgeFile(characterKey, archiveId) {
+    const events=(settings().fileOutbox || []).filter(event=>event.characterKey===characterKey && (event.payload.uvuArchiveId || event.payload.archiveId)===archiveId);
+    const file={format:'uvu-bridge-file',version:1,direction:'to-uvu',characterKey,archiveId,events};
+    const text=JSON.stringify(file,null,2);
+    await globalThis.UvUBridgeFile.validate(text,{direction:'to-uvu',characterKey,archiveId});
+    return text;
 }
 
 async function refreshPairCode() {
@@ -893,6 +1003,34 @@ function renderPanel() {
           <button type="button" data-action="retry-storage">重试连接存储</button>
           <p data-version>扩展 ${EXTENSION_VERSION} · 服务端待检查</p><button type="button" data-action="check-version">检查版本</button>
           <p data-bridge-status role="status">等待本机桥接服务</p>
+          <section data-tt-config hidden>
+            <h3>TauriTavern / iOS 连接</h3>
+            <p data-tt-capabilities></p>
+            <p>本机页面来源：<code data-tt-origin></code></p>
+            <label>TT 交接方式<select data-tt-mode><option value="file">离线 JSON 文件</option><option value="https">自建 HTTPS 中继</option></select></label>
+            <label>TT 中继地址<input type="url" data-tt-endpoint autocomplete="off" placeholder="https://relay.example.com"></label>
+            <label>TT 独立管理员密钥<input type="password" data-tt-secret autocomplete="off" spellcheck="false"></label>
+            <button type="button" data-action="save-tt">保存 TT 连接</button>
+            <p>文件模式只交接副本；开始线下剧情前请手动停止 UvU 自动回复。实时模式及手机通道需要两端连接同一 HTTPS 中继。</p>
+            <label>文件目标 UvU 角色 ID<input type="text" data-file-character maxlength="200" autocomplete="off"></label>
+            <label>文件目标 UvU 存档 ID<input type="text" data-file-archive maxlength="200" autocomplete="off"></label>
+            <label>从 UvU 导出的 JSON 文件<input type="file" data-file-input accept="application/json,.json"></label>
+            <div class="uvu-bridge-row"><button type="button" data-action="import-file">导入线上交接文件</button><button type="button" data-action="export-file">下载待交接剧情 JSON</button><button type="button" data-action="clear-file-outbox">清空已交接发件箱</button></div>
+            <details><summary>TT / iOS 安装、部署与逐步操作</summary>
+              <ol>
+                <li>使用允许第三方扩展执行、包含 Host ABI 2 的 TT 构建，在扩展管理中安装本仓库。公开 TestFlight 外测策略可能禁用第三方扩展；扩展未加载时本面板也无法出现。请选择允许此能力的发行版本；本扩展不会改写宿主策略。</li>
+                <li>无需服务器时选择“离线 JSON 文件”，点“保存 TT 连接”。在 UvU 选定交接角色与存档并保存，导出所选范围文件。把文件通过系统“文件”或自己的传输方式交给 TT；在上方逐字填写相同角色 ID、存档 ID，选择文件并点“导入线上交接文件”。文件里声明的角色不会替你更换当前酒馆角色，请先打开正确角色私聊。</li>
+                <li>展开“线上记忆审核”，核对存档与每条文字，勾选后点“保存勾选与编辑”；需要作为下场来源时点“设为下场记忆来源”。开启在线记忆注入，再开始线下剧情。文件模式请手动停止另一端回复；不要把“拿出手机”当成跨设备实时连接。</li>
+                <li>继续使用 TT 正常聊天。结束时点“结束并导出”，再填写同一角色、同一存档 ID，点“下载待交接剧情 JSON”。将 JSON 交给 UvU，在对应角色与存档导入并审核摘要预览，明确确认后才进入可用记忆。确认另一端已保存后才清空发件箱；下载不代表对方接收。发送失败可重试，原聊天始终保留。</li>
+                <li>需要 HTTPS 实时连接时，在自己的常开服务器安装 Node 20+，克隆本仓库；复制 server/relay-config.example.json 为 server/relay-config.json。用命令生成随机管理员密钥：<code>node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"</code>，填入私有配置的 adminSecret，勿提交配置或分享此密钥。</li>
+                <li>在私有配置填写自己的域名 publicUrl、UvU 网页精确来源 clientOrigins，以及本机页面来源对应的 uiOrigins。iOS 与桌面来源可能不同，须按实际请求 Origin 逐一配置；不允许星号、null 或任意来源。上面显示的页面来源可作排查线索，最终以自己中继的浏览器请求头为准。若宿主只发送 null 来源，请使用文件模式，勿放开中继来源限制。</li>
+                <li>运行 <code>node server/relay.js</code>，服务仅监听服务器 127.0.0.1:8766。给自己的域名配置有效 TLS 证书并反向代理到该端口，例如 Caddy 配置 <code>你的域名 { reverse_proxy 127.0.0.1:8766 }</code>。只把 HTTPS 443 对外开放；将 Node 设为受系统管理的后台服务，备份 server/data/tt-relay-state.json。详细私有配置、运行和故障处理见仓库 docs/tt-deployment.md。</li>
+                <li>在此选“自建 HTTPS 中继”，输入 publicUrl 相同基址及独立管理员密钥，点“保存 TT 连接”。这组凭证仅存入 TT 自己的原生扩展存储。随后生成一次性码或永久码；在 UvU 切换 TT 通道，填同一基址和配对码连接。UvU 得到的是独立设备凭证，绝不能填管理员密钥。两端前台同步后刷新角色目录，再绑定并按正常审核、开始、结束流程操作。</li>
+                <li>401：核对 TT 管理员密钥或重新配对 UvU；403：核对精确来源配置；429：等一分钟；503：检查服务器磁盘权限与剩余空间，保留待发内容重试。中继重建、队列缺口或 TT 聊天未保存都会明确停止；按提示重新交接，不能视为已完成。后台挂起后回到前台刷新，切换聊天后回原聊天继续本场。升级两端到相同版本并重启服务器。</li>
+              </ol>
+              <p>该中继为个人私有单用户实例，绑定设备共享同一目录、队列和模式，不提供多租户隔离。没有代建公共服务器，没有内置地址或密钥。已做桌面浏览器与 HTTP 自动化验证；尚未进行 iPhone / iPad 真机验收。</p>
+            </details>
+          </section>
           <p class="uvu-bridge-identity" data-current-identity>正在读取角色...</p>
           <label>绑定到 UvU 角色<select data-uvu-character autocomplete="off"><option value="">先从 UvU 同步角色目录</option></select></label>
           <div class="uvu-bridge-row">
@@ -973,6 +1111,18 @@ function renderPanel() {
         finally { charInput.disabled = false; }
     }));
     updateLinkField();
+    const ttPanel=panel.querySelector('[data-tt-config]');
+    ttPanel.hidden=!isTT();
+    if (isTT()) {
+        const info=globalThis.UvUBridgePlatform.inspect();
+        panel.querySelector('[data-tt-capabilities]').textContent=`Host ABI ${info.abiVersion || '未知'} · ${info.canInject ? '宿主允许记忆注入' : '宿主策略禁止记忆注入'}${info.profile ? ' · '+info.profile : ''}`;
+        panel.querySelector('[data-tt-origin]').textContent=globalThis.location?.origin || '未知；查看请求 Origin';
+        panel.querySelector('[data-tt-mode]').value=ttConnection.mode;
+        panel.querySelector('[data-tt-endpoint]').value=ttConnection.endpoint || '';
+        panel.querySelector('[data-tt-secret]').value=ttConnection.adminSecret || '';
+        panel.querySelector('[data-file-character]').value=activeUvuKey();
+        panel.querySelector('[data-file-archive]').value=settings().fileTargetArchive || '';
+    }
     const bridgeEnabled = panel.querySelector('[data-bridge-enabled]');
     bridgeEnabled.checked = settings().bridgeEnabled !== false;
     bridgeEnabled.addEventListener('change', () => configure(() => { bridgeEnabled.checked = settings().bridgeEnabled !== false; }, async () => {
@@ -1005,9 +1155,46 @@ function renderPanel() {
         actionBusy = true;
         const button = event.target.closest('button'); button.disabled = true;
         try {
+            if (action === 'save-tt') {
+                if (!isTT()) throw new Error('当前不是 TT 宿主。');
+                const next={mode:panel.querySelector('[data-tt-mode]').value,endpoint:panel.querySelector('[data-tt-endpoint]').value.trim(),adminSecret:panel.querySelector('[data-tt-secret]').value.trim()};
+                if (next.mode==='https') {
+                    next.endpoint=globalThis.UvUBridgePlatform.normalizeEndpoint(next.endpoint);
+                    if (next.adminSecret.length<32) throw new Error('管理员密钥至少 32 位；须与私有中继配置一致。');
+                }
+                stopPolling();invalidateRequests();
+                if (settings().scene) settings().scene.suspended=true;
+                updatePrompt();
+                // Persist suspension first so a failed second write cannot restore a scene on a new relay.
+                await persistSettings();
+                await globalThis.UvUBridgePlatform.saveState(next,'connection');
+                ttConnection=next;
+                setStorageControls(false);await activateStorage();
+                showStatus(next.mode==='file' ? 'TT 文件模式已保存。请按教程逐次交接。' : 'TT HTTPS 连接已保存；请生成配对码并在 UvU 选择 TT 通道连接。');return;
+            }
             if (action === 'retry-storage') { await restoreSettings(); await activateStorage(); showStatus('可靠存储已恢复，角色隔离监听已生效。'); return; }
             if (!durableReady && action !== 'check-version') throw new Error('请先重试连接存储。');
             if (sceneBusy) throw new Error('当前剧情操作尚未完成，请稍候。');
+            if (action === 'import-file') {
+                const file=panel.querySelector('[data-file-input]').files?.[0];
+                if (!file) throw new Error('请先选择 UvU 导出的 JSON 文件。');
+                if (file.size>globalThis.UvUBridgeFile.MAX_BYTES) throw new Error('交接文件超过 16 MiB。');
+                const result=await importBridgeFile(await file.text(),panel.querySelector('[data-file-character]').value.trim(),panel.querySelector('[data-file-archive]').value.trim());
+                showStatus(result.duplicate ? '此文件已接收，未重复写入。' : '文件已保存为待审副本，请在“线上记忆审核”勾选并保存。');
+            }
+            if (action === 'export-file') {
+                const key=panel.querySelector('[data-file-character]').value.trim(), archive=panel.querySelector('[data-file-archive]').value.trim();
+                const text=await exportBridgeFile(key,archive),url=URL.createObjectURL(new Blob([text],{type:'application/json'}));
+                const anchor=document.createElement('a');anchor.href=url;anchor.download='uvu-bridge-'+Date.now()+'.json';anchor.click();
+                setTimeout(()=>URL.revokeObjectURL(url),60000);showStatus('已生成剧情交接 JSON；请在对应 UvU 角色与存档导入并审核。');
+            }
+            if (action === 'clear-file-outbox') {
+                if (settings().scene) throw new Error('先结束或放弃当前场景，避免清空正在续传的内容。');
+                if (!confirm('确认接收方已经保存文件？清空后仍保留原聊天，但不能再次下载这些交接事件。')) return;
+                const previous=settings().fileOutbox;settings().fileOutbox=[];
+                try {await persistSettings();} catch(error) {settings().fileOutbox=previous;throw error;}
+                showStatus('已清空文件发件箱，原聊天保留。');
+            }
             if (action === 'check-version') await checkVersion();
             if (action === 'refresh-online') {
                 const result = await pollEvents({ manual: true });
@@ -1037,6 +1224,7 @@ function renderPanel() {
             }
             if (action === 'start-scene') await startScene();
             if (action === 'phone-mode') {
+                if (isFileMode()) throw new Error('文件模式没有实时手机通道，请先配置 HTTPS 中继。');
                 if (!settings().scene) throw new Error('先开始一场线下剧情。');
                 await setMode('phone');
                 showStatus('已开启手机消息通道；UvU 仍使用自己的回复 API。');
@@ -1057,7 +1245,7 @@ function renderPanel() {
 
 function startPolling() {
     stopPolling();
-    if (settings().bridgeEnabled === false) return;
+    if (settings().bridgeEnabled === false || isFileMode()) return;
     pollTimer = setInterval(pollEvents, 4000);
     directoryTimer = setInterval(() => refreshCharacterDirectory().catch(() => {}), 10000);
     pollEvents();
@@ -1066,7 +1254,7 @@ function startPolling() {
 function setStorageControls(ready) {
     durableReady = ready;
     for (const control of panel?.querySelectorAll('button, input, select, textarea') || [])
-        control.disabled = !ready && !['retry-storage', 'check-version'].includes(control.dataset.action);
+        control.disabled = !ready && !['retry-storage', 'check-version','save-tt'].includes(control.dataset.action) && !control.closest?.('[data-tt-config]');
 }
 
 async function activateStorage() {
@@ -1095,6 +1283,7 @@ async function activateStorage() {
 }
 
 async function init() {
+    if (isTT()) await (globalThis.__TAURITAVERN__?.ready ?? globalThis.__TAURITAVERN_MAIN_READY__);
     context = getContext();
     context.extensionSettings[SETTINGS_KEY] = { ...structuredClone(DEFAULT_SETTINGS), ...(context.extensionSettings[SETTINGS_KEY] || {}) };
     context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
@@ -1108,6 +1297,11 @@ async function init() {
     });
     document.addEventListener('visibilitychange', pollEvents);
     try {
+        if (isTT()) {
+            globalThis.UvUBridgePlatform.assertSupported();
+            const connection=await globalThis.UvUBridgePlatform.loadState('connection');
+            if (connection) ttConnection=connection;
+        }
         await restoreSettings();
         renderPanel();
         setStorageControls(false);

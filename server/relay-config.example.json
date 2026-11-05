@@ -1,0 +1,10 @@
+{
+  "publicUrl": "https://relay.example.com",
+  "adminSecret": "",
+  "clientOrigins": ["https://your-uvu.example.com"],
+  "uiOrigins": ["tauri://localhost"],
+  "port": 8766,
+  "dataFile": "data/tt-relay-state.json",
+  "requestsPerMinute": 120,
+  "maxPayloadBytes": 65536
+}

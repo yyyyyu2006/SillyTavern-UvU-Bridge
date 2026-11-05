@@ -1,12 +1,13 @@
 {
   "name": "sillytavern-uvu-bridge",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "private": false,
   "description": "Local memory and scene bridge between UvU and SillyTavern",
   "main": "server/index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "node --test tests/*.test.cjs"
+    "test": "node --test tests/*.test.cjs",
+    "relay": "node server/relay.js"
   },
   "license": "MIT"
 }
