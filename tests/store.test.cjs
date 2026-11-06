@@ -198,3 +198,9 @@ test('account review storage survives restart and failed writes retain the last 
  assert.equal(broken.getUiState('alice').revision,0);
  assert.equal(broken.getUiState('alice').settings,null);
 });
+
+test('relay queue diagnostics report capacity without secrets or story data',async()=>{
+ const store=createBridgeStore({maxEvents:100});await store.appendEvent(event('uvu','diagnostic',{payload:{text:'SECRET STORY'}}),'uvu');
+ const snapshot=store.getService();assert.deepEqual(snapshot.capacity,{limit:100,used:1,remaining:99});assert.equal(store.listEvents('sillytavern').capacity.remaining,99);
+ assert.doesNotMatch(JSON.stringify(snapshot),/SECRET STORY|tokenHash|pairing/);
+});

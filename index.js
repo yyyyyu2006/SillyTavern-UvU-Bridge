@@ -7,7 +7,7 @@ import { extension_prompt_types } from '../../../../script.js';
 const EXTENSION_ID = 'uvu-story-bridge';
 const API = '/api/plugins/uvu-story-bridge/v1';
 const SETTINGS_KEY = EXTENSION_ID;
-const EXTENSION_VERSION = '0.5.1';
+const EXTENSION_VERSION = '0.6.0';
 const PROTOCOL_VERSION = 1;
 const DEFAULT_SETTINGS = { characterLinks: {}, injectMemory: false, bridgeEnabled: true, cursorByCharacter: {}, packetsByCharacter: {}, scene: null };
 let context;
@@ -161,19 +161,27 @@ function sceneText(messages) {
     }).filter(Boolean).join('\n\n');
 }
 
+function extractionMapping() {return settings().extractionByCharacter?.[activeStKey()] || {bodyTags:settings().bodyTags || '',excludeTags:settings().excludeTags || ''};}
+async function saveExtractionMapping(field,value) {
+    if(!['bodyTags','excludeTags'].includes(field) || !activeStKey() || context.groupId!=null)throw new Error('请先打开目标角色私聊，再保存该角色正文规则。');
+    const key=activeStKey(),map=settings().extractionByCharacter ||= {},before=map[key];
+    map[key]={...extractionMapping(),[field]:String(value).trim().slice(0,800)};
+    try{await persistSettings();}catch(error){if(before===undefined)delete map[key];else map[key]=before;throw error;}
+}
 function sceneFloorParts(messages, history = context.chat) {
     context = getContext();
     const result = [];
     for (const [index, message] of messages.entries()) {
         if (!message || message.is_system || message.is_hidden || message.is_thinking) continue;
-        const extracted = globalThis.UvUBridgeText.extractStory(message.mes, {bodyTags: settings().bodyTags || '', excludeTags: settings().excludeTags || ''});
+        const mapping=extractionMapping();
+        const extracted = globalThis.UvUBridgeText.inspectStory(message.mes, {bodyTags: mapping.bodyTags || '', excludeTags: mapping.excludeTags || ''});
         if (extracted.mode === 'malformed') throw new Error('第 ' + (index + 1) + ' 层正文标签未正确闭合，请检查原文或自定义正文标签；未开始导出。');
         if (!extracted.text) continue;
         const raw = message.send_date || message.timestamp, stamp = raw ? (Number(raw) || Date.parse(raw)) : NaN;
         const floor = {id: 'floor-' + index, number: history.indexOf(message) + 1,
             speaker: String(message.is_user ? context.name1 || 'User' : message.name || context.name2 || 'Character').slice(0, 120),
             role: message.is_user ? 'user' : 'assistant', createdAt: Number.isFinite(stamp) && stamp > 0 && stamp <= 8640000000000000 ? stamp : 0,
-            extraction: extracted.mode, bodyTag: extracted.tag};
+            extraction: extracted.mode, bodyTag: extracted.tag, provenance:{filteredTags:extracted.filteredTags.slice(0,40),unknownTags:extracted.unknownTags.slice(0,40),sourceChars:extracted.sourceChars,extractedChars:extracted.extractedChars}};
         const chunks = [], encoder = new TextEncoder();
         let points = [], bytes = 0;
         for (const point of extracted.text) {
@@ -760,6 +768,21 @@ async function startScene() {
     showStatus('已记录本场起点。关闭面板，在酒馆聊天框输入开场；不会自动发消息或跳转。');
 }
 
+function renderExtractionPreview(parts, history) {
+    if(!panel?.querySelector || !document.createElement)return;
+    let host=panel.querySelector('[data-extraction-preview]');
+    if(!host){host=document.createElement('details');host.dataset.extractionPreview='true';panel.append(host);}
+    const title=document.createElement('summary');title.textContent='本场正文提取预览（原消息保留）';host.replaceChildren(title);
+    const first=parts.filter(item=>item.floor?.part===1);
+    for(const item of first.slice(0,20)){
+        const detail=document.createElement('details'),heading=document.createElement('summary');const floor=item.floor,info=floor.provenance;
+        heading.textContent='第 '+floor.number+' 层 · '+floor.speaker+' · '+(floor.bodyTag?'命中 '+floor.bodyTag:'未匹配正文标签')+' · 过滤：'+(info?.filteredTags.join('、') || '无')+' · 未知：'+(info?.unknownTags.join('、') || '无');
+        detail.append(heading);detail.addEventListener('toggle',()=>{if(!detail.open || detail.dataset.loaded)return;detail.dataset.loaded='true';const raw=document.createElement('pre'),extracted=document.createElement('pre');
+            raw.textContent='原楼层：\n'+String(history[floor.number-1]?.mes || '');extracted.textContent='提取结果：\n'+parts.filter(part=>part.floor?.id===floor.id).map(part=>part.text).join('');detail.append(raw,extracted);});host.append(detail);
+    }
+    if(first.length>20){const note=document.createElement('p');note.textContent='预览仅加载前 20 层；UvU 导入后可分批审核全部 '+first.length+' 层。';host.append(note);}host.open=true;
+}
+
 async function endScene() {
     context = getContext();
     const scene = settings().scene;
@@ -775,6 +798,10 @@ async function endScene() {
         const messageEnd = history.length;
         const parts = sceneFloorParts(sceneMessages(scene, history), history);
         if (!parts.length) throw new Error('本场没有有效剧情，可点“结束空场”恢复线上。');
+        renderExtractionPreview(parts,history);
+        const unknown=[...new Set(parts.flatMap(item=>item.floor?.provenance?.unknownTags || []))];
+        if(unknown.length && (typeof confirm!=='function' || !confirm('检测到未知预设标签：'+unknown.join('、')+'。请先在提取预览核对原楼层、过滤块与结果；确认继续导出到 UvU 待审核？')))
+            throw new Error('请核对提取预览并确认未知标签，尚未冻结或导出。');
         const frozen = [];
         for (const item of parts) frozen.push({...item, partHash: await checksum(item.text)});
         for (const [index, item] of frozen.entries()) {
@@ -1125,8 +1152,8 @@ function renderPanel() {
             <button type="button" data-online-only data-action="close-phone">收起手机</button>
             <button type="button" data-action="end-scene">结束并导出</button>
           </div>
-          <label>正文标签（留空自动识别；多个用逗号分隔）<input type="text" data-body-tags maxlength="800" placeholder="如 content、maintext、正文；填写时按顺序匹配"></label>
-          <label>额外排除标签（逗号分隔，如 status_box）<input type="text" data-exclude-tags placeholder="只影响导出副本"></label>
+          <label>本角色正文标签（留空自动识别；多个用逗号分隔）<input type="text" data-body-tags maxlength="800" placeholder="如 content、maintext、正文；填写时按顺序匹配"></label>
+          <label>本角色额外排除标签（逗号分隔，如 status_box）<input type="text" data-exclude-tags placeholder="只影响导出副本"></label>
           <button type="button" data-action="cancel-scene">结束空场 / 放弃本场导出</button>
           <details><summary>UvU → 酒馆：线上记忆审核</summary><button type="button" data-online-only data-action="refresh-online">刷新线上存档</button><p class="uvu-bridge-help">读取 UvU 已交接的最新副本，不会直接读取未发送的聊天。新内容须审核保存后才可注入。</p><div data-online-review></div></details>
           <p data-online-only class="uvu-bridge-help">角色目录由已配对的 UvU 页面提供。开始前请核对酒馆角色、UvU 角色名与 ID；绑定、聊天、来源存档在本场锁定。切换聊天不会把场景记忆带给其他角色。</p>
@@ -1153,14 +1180,11 @@ function renderPanel() {
     console.info('[UvU Bridge] Control panel mounted in SillyTavern extension settings.');
 
     const exclude = panel.querySelector('[data-exclude-tags]');
-    exclude.value = settings().excludeTags || '';
-    exclude.addEventListener('change', () => configure(() => { exclude.value = settings().excludeTags || ''; }, async () => { const before = settings().excludeTags; settings().excludeTags = exclude.value; try { await persistSettings(); } catch(error) { settings().excludeTags = before; exclude.value = before || ''; showStatus('排除规则保存失败：' + error.message, true); } }));
     const bodyTags = panel.querySelector('[data-body-tags]');
-    bodyTags.value = settings().bodyTags || '';
-    bodyTags.addEventListener('change', () => configure(() => {bodyTags.value = settings().bodyTags || '';}, async () => {
-        const before = settings().bodyTags; settings().bodyTags = bodyTags.value.trim();
-        try {await persistSettings(); showStatus('正文标签已保存，只影响下次冻结的导出副本。');}
-        catch (error) {settings().bodyTags = before; bodyTags.value = before || ''; showStatus('正文标签保存失败：' + error.message, true);}
+    const updateMappingFields=()=>{exclude.value=extractionMapping().excludeTags || '';bodyTags.value=extractionMapping().bodyTags || '';};updateMappingFields();
+    for(const [field,node] of [['excludeTags',exclude],['bodyTags',bodyTags]])node.addEventListener('change',()=>configure(updateMappingFields,async()=>{
+        try{await saveExtractionMapping(field,node.value);showStatus('本角色正文提取规则已保存；下次冻结导出时生效，现有原文与冻结内容保留。');}
+        catch(error){updateMappingFields();showStatus('正文提取规则保存失败：'+error.message,true);}
     }));
     const charInput = panel.querySelector('[data-uvu-character]');
     charInput.addEventListener('change', () => configure(updateLinkField, async () => {
@@ -1357,9 +1381,9 @@ async function activateStorage() {
     const exclude = panel?.querySelector('[data-exclude-tags]');
     if (enabled) enabled.checked = settings().bridgeEnabled !== false;
     if (inject) inject.checked = settings().injectMemory === true;
-    if (exclude) exclude.value = settings().excludeTags || '';
+    if (exclude) exclude.value = extractionMapping().excludeTags || '';
     const bodyTags = panel?.querySelector('[data-body-tags]');
-    if (bodyTags) bodyTags.value = settings().bodyTags || '';
+    if (bodyTags) bodyTags.value = extractionMapping().bodyTags || '';
     updateLinkField();
     updatePrompt();
     const review = panel?.querySelector('[data-online-review]');
@@ -1381,6 +1405,7 @@ async function init() {
         updateLinkField();
         updatePrompt();
         renderOnlineReview();
+        const body=panel?.querySelector('[data-body-tags]'),exclude=panel?.querySelector('[data-exclude-tags]');if(body)body.value=extractionMapping().bodyTags || '';if(exclude)exclude.value=extractionMapping().excludeTags || '';
     });
     document.addEventListener('visibilitychange', pollEvents);
     try {

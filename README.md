@@ -4,6 +4,8 @@ This project is a local, opt-in bridge between the UvU phone UI and SillyTavern.
 
 ## Current status
 
+Version 0.6.0 adds extraction provenance and unknown-tag confirmation, per-character extraction mappings, queue capacity diagnostics, and recovery that preserves incomplete scene parts. UvU adds paged review, versioned drafts, budgeted summaries and detailed ST/TT tutorials. See [review and diagnostics](docs/review-and-diagnostics.md). Protocol remains version 1; update both checkouts and restart the server plugin.
+
 Version 0.5.1 clarifies the default TT file workflow, validates file target IDs and rejects static Pages relay addresses. Changing the TT mode is a pending choice until **保存 TT 连接**; a visible notice identifies the saved/current and selected modes, and sync plus mode-dependent operations pause until saved or reverted.
 
 Version 0.5.0 adds TauriTavern Host ABI 2 support, a private self-hostable HTTPS relay, and reviewed offline JSON exchange. See [TT/iOS installation, deployment and operation](docs/tt-deployment.md). TT defaults to **无需服务器的文件交接**: install the UI extension, export UvU JSON, import and review it in TT, start/end a scene, download the return JSON, then import and approve it in UvU. The file target IDs are read from the validated packet. No Termux, Node backend, endpoint or pairing code is required for this workflow. The panel hides ST backend instructions and shows relay/admin controls only after selecting optional HTTPS mode. Existing saved HTTPS connections remain selected. No public relay or bundled secret is provided; physical iPhone/iPad execution is not yet verified. Original Node Tavern installation below remains available.

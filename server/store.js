@@ -229,14 +229,14 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         const events = state.events.filter(event => event.target === target && event.seq > cursor && (!key || event.characterKey === key)).slice(0, count);
         const latestSeq = state.nextSeq - 1;
         const gapSeq = Number(state.gaps[`${target}:${key || '*'}`]) || 0;
-        return { events: structuredClone(events), relayId: state.relayId, gapSeq, latestSeq, gapDetected: cursor < gapSeq, cursor: events.at(-1)?.seq || latestSeq };
+        return { events: structuredClone(events), capacity:queueCapacity(), relayId: state.relayId, gapSeq, latestSeq, gapDetected: cursor < gapSeq, cursor: events.at(-1)?.seq || latestSeq };
     }
 
     function inbox(target) {
         if (!SOURCES.has(target)) throw new Error('Invalid event target');
         const latest = new Map();
         for (const event of state.events) if (event.target === target) latest.set(event.characterKey, event.seq);
-        return { relayId: state.relayId, characters: [...latest].map(([characterKey, latestSeq]) => ({ characterKey, latestSeq })) };
+        return { relayId: state.relayId, capacity:queueCapacity(), characters: [...latest].map(([characterKey, latestSeq]) => ({ characterKey, latestSeq })) };
     }
 
     async function acknowledge(target, seq, characterKey = '') {
@@ -255,7 +255,8 @@ function createBridgeStore({ filePath = null, maxEvents = 2000, pairTtlMs = 5 * 
         return { ...result, mode: state.enabled === false ? 'online' : result.mode, enabled: state.enabled !== false };
     }
 
-    function getService() { return { enabled: state.enabled !== false, relayId: state.relayId, ...require('./version.js') }; }
+    function queueCapacity() {return {limit:capacity,used:state.events.length,remaining:Math.max(0,capacity-state.events.length)};}
+    function getService() { return { enabled: state.enabled !== false, relayId: state.relayId, capacity:queueCapacity(), ...require('./version.js') }; }
 
     async function setEnabled(enabled) {
         if (typeof enabled !== 'boolean') throw new Error('Invalid enabled flag');

@@ -547,3 +547,17 @@ test('floor chunks budget JSON escapes and normalize invalid source dates',()=>{
  assert.equal(parts.map(item=>item.text).join(''),'\u0000'.repeat(8000));
  for(const item of parts){assert.ok(Buffer.byteLength(JSON.stringify(item))<26000);assert.equal(item.floor.createdAt,0);}
 });
+
+test('unknown preset tags require extraction confirmation before freezing or exporting scene',async()=>{
+ const sent=[],f=fixture(async(url,options)=>{if(url.endsWith('/ui/events'))sent.push(JSON.parse(options.body));return {ok:true,json:async()=>({})};});
+ vm.runInContext('globalThis.finishScene=endScene;',f.sandbox);f.settings.scene.startBoundary={empty:true};f.context.chat=[{mes:'<unknown-preset>剧情</unknown-preset><status>排除</status>',name:'A'}];
+ f.sandbox.confirm=()=>false;await assert.rejects(f.sandbox.finishScene(),/确认|预览/);assert.equal(sent.length,0);assert.equal(f.settings.scene.exportParts,undefined);
+ f.sandbox.confirm=()=>true;await f.sandbox.finishScene();assert.equal(sent[0].payload.floor.provenance.unknownTags[0],'unknown-preset');assert.equal(sent[0].payload.floor.provenance.filteredTags[0],'status');
+});
+
+test('story tag mapping is scoped to the Tavern character and rolls back failed persistence',async()=>{
+ const f=fixture();vm.runInContext('globalThis.mapping={read:extractionMapping,save:saveExtractionMapping};',f.sandbox);
+ f.settings.bodyTags='legacy';await f.sandbox.mapping.save('bodyTags','custom');assert.equal(f.sandbox.mapping.read().bodyTags,'custom');
+ f.context.characters.push({avatar:'other.png'});f.context.characterId=1;assert.equal(f.sandbox.mapping.read().bodyTags,'legacy');
+ f.context.bridgeWrite=async()=>{throw new Error('quota');};await assert.rejects(f.sandbox.mapping.save('bodyTags','failed'),/quota/);assert.equal(f.sandbox.mapping.read().bodyTags,'legacy');
+});

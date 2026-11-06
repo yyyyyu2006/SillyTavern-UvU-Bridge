@@ -78,6 +78,16 @@
             .replace(/^\s*(?:小剧场|番外剧场|状态栏)\s*[：:][\s\S]*$/mu, '');
         return {text: clean(source), mode: 'plain', tag: ''};
     }
+    function inspectStory(value, options = {}) {
+        const result = extractStory(value, options), source = String(value || '');
+        const tags = [...new Set([...source.matchAll(/<\s*\/?\s*([a-z\u3400-\u9fff][a-z0-9_\-\u3400-\u9fff]*)\b[^>]*>/giu)].map(match => match[1].toLowerCase()))];
+        const blocked = new Set(['think','thinking','analysis','reasoning','cot','status','statusbar','status_bar','status_panel','statusbox','status_box','uiboard','small_theater','smalltheater','mini_theater','theater','小剧场','状态栏','状态','思考','思维链','script','style','iframe','object','svg', ...String(options.excludeTags || '').split(/[,，\s]+/u)]);
+        const known = new Set([...BODY_TAGS, ...String(options.bodyTags || '').split(/[,，\s]+/u), 'p','div','span','b','strong','i','em','br','a','img','section','article','ul','ol','li','details','summary']);
+        const filteredTags = tags.filter(tag => blocked.has(tag));
+        const unknownTags = tags.filter(tag => !blocked.has(tag) && !known.has(tag));
+        return {...result, filteredTags, unknownTags, sourceChars: source.length, extractedChars: result.text.length,
+            requiresConfirmation: result.mode !== 'tagged' || unknownTags.length > 0};
+    }
     function segments(value) {
         return clean(value).split(/\n\s*\n/).map(text => text.trim()).filter(Boolean).map((text, index) => ({ id: String(index + 1), text, selected: false }));
     }
@@ -104,7 +114,7 @@
         delete pending[key];
         return { text, createdAt: entry.createdAt };
     }
-    const api = { clean, fingerprint, extractStory, BODY_TAGS, segments, addMessagePart };
+    const api = { clean, fingerprint, extractStory, inspectStory, BODY_TAGS, segments, addMessagePart };
     root.UvUBridgeText = api;
     if (typeof module !== 'undefined') module.exports = api;
 })(typeof globalThis === 'undefined' ? this : globalThis);
