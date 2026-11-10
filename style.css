@@ -38,3 +38,33 @@
 
 .uvu-bridge-panel [hidden] { display: none !important; }
 .uvu-bridge-panel, .uvu-bridge-panel label, .uvu-bridge-panel .uvu-bridge-fields { min-width: 0; overflow-wrap: anywhere; }
+
+/* Task-based workspace. All existing controls and callbacks remain inside the extension. */
+.uvu-bridge-panel { --bridge-ink:#191b1f;--bridge-muted:#747980;--bridge-line:#e6e8eb;background:#f6f7f8;color:var(--bridge-ink);border:1px solid var(--bridge-line);border-radius:20px;max-width:560px;padding:0;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;overflow:hidden; }
+.uvu-bridge-panel * { box-sizing:border-box; }
+.uvu-bridge-panel .inline-drawer-header { background:#fff;color:var(--bridge-ink);padding:16px 20px;border:0;border-bottom:1px solid var(--bridge-line); }
+.uvu-bridge-panel .inline-drawer-header b { font-size:20px;letter-spacing:-.5px; }
+.uvu-bridge-panel .inline-drawer-content { padding:0; }
+.uvu-bridge-panel .uvu-bridge-fields { display:flex;flex-direction:column;gap:16px;padding:20px;max-height:80dvh;overflow:auto;overscroll-behavior:contain; }
+.uvu-bridge-panel .uvu-bridge-task,.uvu-bridge-panel [data-tt-config] { display:flex;flex-direction:column;gap:12px;background:#fff;border:1px solid var(--bridge-line);border-radius:18px;padding:16px;min-width:0; }
+.uvu-bridge-panel details.uvu-bridge-task { display:block; }
+.uvu-bridge-panel details.uvu-bridge-task[open] > :not(summary) { margin-top:12px; }
+.uvu-bridge-panel h3 { font-size:16px;font-weight:600; }
+.uvu-bridge-panel label { gap:8px;font-size:12px;color:var(--bridge-muted); }
+.uvu-bridge-panel label.uvu-bridge-check { font-size:14px;justify-content:space-between;color:var(--bridge-ink); }
+.uvu-bridge-panel input[type=checkbox] { width:16px;height:16px;margin:0;accent-color:#202328; }
+.uvu-bridge-panel label.uvu-bridge-check > input { order:2; }
+.uvu-bridge-panel input:not([type=checkbox]),.uvu-bridge-panel select,.uvu-bridge-panel textarea { min-height:44px;width:100%;padding:10px 12px;background:#fff;color:var(--bridge-ink);border:1px solid #e2e5e8;border-radius:12px;font-size:14px;box-shadow:none; }
+.uvu-bridge-panel button { display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;padding:8px 14px;border:1px solid var(--bridge-line);border-radius:18px;background:#fff;color:var(--bridge-ink);font-size:13px;line-height:1.4; }
+.uvu-bridge-panel button:disabled { opacity:.45; }
+.uvu-bridge-panel .uvu-bridge-row { gap:10px; }
+.uvu-bridge-panel [data-action=start-scene],.uvu-bridge-panel [data-action=end-scene] { background:#191b1f;color:#fff;border-color:#191b1f; }
+.uvu-bridge-panel :is([data-version],.uvu-bridge-help,[data-pair-expiry]) { font-size:12px;color:var(--bridge-muted);opacity:1; }
+.uvu-bridge-panel .uvu-bridge-identity { border:0;border-radius:12px;background:#f4f5f6;padding:12px;font-size:13px; }
+.uvu-bridge-panel details > summary { list-style:none;min-height:32px;font-size:14px;display:flex;align-items:center; }
+.uvu-bridge-panel details > summary::-webkit-details-marker { display:none; }
+.uvu-bridge-panel .uvu-bridge-review-list { max-height:440px;gap:12px; }
+.uvu-bridge-panel .uvu-bridge-review-list > details { border:1px solid var(--bridge-line);border-radius:16px;padding:12px; }
+.uvu-bridge-panel :is(button,input,select,textarea,summary):focus-visible { outline:2px solid #788898;outline-offset:3px; }
+@media(max-width:350px) { .uvu-bridge-panel .uvu-bridge-fields { padding:16px; } .uvu-bridge-panel .uvu-bridge-row > button { flex:1; } }
+@media(prefers-reduced-motion:no-preference) { .uvu-bridge-panel button { transition:background 160ms,opacity 160ms; } }

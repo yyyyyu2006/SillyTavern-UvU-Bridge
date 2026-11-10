@@ -1056,6 +1056,27 @@ function renderTransportUI(previewMode = ttPreviewMode || ttConnection.mode) {
     }
 }
 
+function layoutBridgePanel() {
+    const fields=panel.querySelector('.uvu-bridge-fields');if(!fields)return;
+    const find=selector=>fields.querySelector(selector), node=(tag,cls,text)=>{const el=document.createElement(tag);el.className=cls;if(text)el.textContent=text;return el;};
+    const group=(title,nodes)=>{const list=nodes.filter(Boolean);if(!list.length)return;const box=node('section','uvu-bridge-task');if(title)box.append(node('h3','',title));box.append(...list);fields.append(box);return box;};
+    const drawer=panel.querySelector('.inline-drawer-header b');if(drawer)drawer.textContent='UvU Bridge';
+    const master=find('[data-bridge-enabled]')?.closest('label'), version=find('[data-version]'),check=find('[data-action="check-version"]'),status=find('[data-bridge-status]'),retry=find('[data-action="retry-storage"]'),tt=find('[data-tt-config]');
+    const identity=find('[data-current-identity]'),binding=find('[data-uvu-character]')?.closest('label'),pairRow=find('[data-action="pair"]')?.parentElement,pairing=find('[data-pairing-panel]');
+    const inject=find('[data-inject-memory]')?.closest('label'),scenes=find('[data-action="start-scene"]')?.parentElement,cancel=find('[data-action="cancel-scene"]');
+    const review=find('[data-online-review]')?.closest('details'),tags=[find('[data-body-tags]')?.closest('label'),find('[data-exclude-tags]')?.closest('label')];
+    const remaining=[...fields.children].filter(el=>!new Set([master,version,check,status,retry,tt,identity,binding,pairRow,pairing,inject,scenes,cancel,review,...tags]).has(el));
+    fields.replaceChildren();
+    group('',[master]);const connection=group('连接',[status,version,check,retry]);if(connection)connection.classList.add('uvu-bridge-connection-card');
+    if(tt)fields.append(tt);
+    group('角色与存档',[identity,binding]);
+    const pairingBox=node('details','uvu-bridge-task uvu-bridge-pairing');pairingBox.append(node('summary','','配对与设备'),...[pairRow,pairing].filter(Boolean));fields.append(pairingBox);
+    group('当前剧情',[inject,scenes,cancel]);
+    if(review) {review.classList.add('uvu-bridge-task');review.open=true;fields.append(review);}
+    const extraction=node('details','uvu-bridge-task');extraction.append(node('summary','','正文识别'),...tags.filter(Boolean));fields.append(extraction);
+    const help=node('details','uvu-bridge-task');help.append(node('summary','','使用说明'),...remaining);fields.append(help);
+}
+
 function renderPanel() {
     if (panel) return;
     const host = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
@@ -1177,6 +1198,7 @@ function renderPanel() {
         </div>
       </div>`;
     host.append(panel);
+    layoutBridgePanel();
     console.info('[UvU Bridge] Control panel mounted in SillyTavern extension settings.');
 
     const exclude = panel.querySelector('[data-exclude-tags]');

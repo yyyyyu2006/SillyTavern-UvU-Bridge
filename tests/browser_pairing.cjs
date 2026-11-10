@@ -54,6 +54,13 @@ const root=path.resolve(__dirname,'..'),uvu=path.resolve(root,'../UvU');
   await tavern.addScriptTag({content:fs.readFileSync(path.join(root,'story-text.js'),'utf8')});
   const nl=String.fromCharCode(10);
   await tavern.addScriptTag({content:fs.readFileSync(path.join(root,'index.js'),'utf8').split(nl).filter(l=>!l.startsWith('import ')).join(nl)});
+  if(process.env.UVU_DRAFT_EVIDENCE){
+   const evidence=path.resolve(process.env.UVU_DRAFT_EVIDENCE);fs.mkdirSync(evidence,{recursive:true});
+   await tavern.setViewportSize({width:402,height:874});
+   await tavern.locator('.uvu-bridge-panel').screenshot({path:path.join(evidence,'st-plugin.png')});
+   await tavern.setViewportSize({width:320,height:844});
+  }
+  await tavern.getByText('配对与设备',{exact:true}).click();
   await tavern.getByText('永久配对与已绑定设备',{exact:true}).click();
   await tavern.getByRole('button',{name:'生成 / 重置永久码',exact:true}).click();
   await tavern.waitForFunction(()=>document.querySelector('[data-permanent-code]').textContent.length===32);
