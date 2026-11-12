@@ -66,5 +66,5 @@
 .uvu-bridge-panel .uvu-bridge-review-list { max-height:440px;gap:12px; }
 .uvu-bridge-panel .uvu-bridge-review-list > details { border:1px solid var(--bridge-line);border-radius:16px;padding:12px; }
 .uvu-bridge-panel :is(button,input,select,textarea,summary):focus-visible { outline:2px solid #788898;outline-offset:3px; }
-@media(max-width:350px) { .uvu-bridge-panel .uvu-bridge-fields { padding:16px; } .uvu-bridge-panel .uvu-bridge-row > button { flex:1; } }
+@media(max-width:350px) { .uvu-bridge-panel .uvu-bridge-fields { padding:16px; } .uvu-bridge-panel .uvu-bridge-row { display:grid;grid-template-columns:repeat(2,minmax(0,1fr)); } .uvu-bridge-panel .uvu-bridge-row > button { width:100%;padding:8px; } }
 @media(prefers-reduced-motion:no-preference) { .uvu-bridge-panel button { transition:background 160ms,opacity 160ms; } }
