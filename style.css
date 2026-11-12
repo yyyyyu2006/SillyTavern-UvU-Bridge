@@ -68,3 +68,34 @@
 .uvu-bridge-panel :is(button,input,select,textarea,summary):focus-visible { outline:2px solid #788898;outline-offset:3px; }
 @media(max-width:350px) { .uvu-bridge-panel .uvu-bridge-fields { padding:16px; } .uvu-bridge-panel .uvu-bridge-row { display:grid;grid-template-columns:repeat(2,minmax(0,1fr)); } .uvu-bridge-panel .uvu-bridge-row > button { width:100%;padding:8px; } }
 @media(prefers-reduced-motion:no-preference) { .uvu-bridge-panel button { transition:background 160ms,opacity 160ms; } }
+
+/* Approved Lenso revision 03. Only this extension's own container. */
+.uvu-bridge-panel { --bridge-ink:#171719;--bridge-muted:#69696f;--bridge-line:#00000013;background:#f2f2f7;border:0;border-radius:24px; }
+.uvu-bridge-panel .inline-drawer-header { background:transparent;padding:18px 20px;border:0; }
+.uvu-bridge-panel .inline-drawer-header b { font-size:26px;font-weight:400;letter-spacing:-.5px; }
+.uvu-bridge-panel .uvu-bridge-fields { gap:20px;padding:0 20px 24px;scroll-padding:20px; }
+.uvu-bridge-panel .uvu-bridge-fields > * { flex-shrink:0; }
+.uvu-bridge-panel :is(.uvu-bridge-task,[data-tt-config]) { gap:16px;border:0;border-radius:20px;padding:16px;background:#fff; }
+.uvu-bridge-panel h3 { font-size:15px;font-weight:500; }
+.uvu-bridge-panel :is(input:not([type=checkbox]),select,textarea) { border:0;background:#f2f2f7;min-height:42px;border-radius:12px; }
+.uvu-bridge-panel label.uvu-bridge-check { min-height:40px;gap:12px; }
+.uvu-bridge-panel label.uvu-bridge-check input[type=checkbox] { appearance:none;position:relative;width:42px;height:26px;flex:0 0 42px;border:0;border-radius:14px;background:#d3d3d9; }
+.uvu-bridge-panel label.uvu-bridge-check input[type=checkbox]::before { content:'';position:absolute;left:3px;top:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 4px #0000001a; }
+.uvu-bridge-panel label.uvu-bridge-check input[type=checkbox]:checked { background:#34c759; }
+.uvu-bridge-panel label.uvu-bridge-check input[type=checkbox]:checked::before { transform:translateX(16px); }
+.uvu-bridge-panel button { min-height:40px;padding:10px 16px;border:0;border-radius:24px;background:#e5e5eb;font-size:13px;font-weight:400; }
+.uvu-bridge-panel :is([data-action=start-scene],[data-action=end-scene],[data-action=refresh-online]) { background:#0088ff;color:#fff; }
+.uvu-bridge-panel .uvu-bridge-routes { display:flex;flex-direction:column;background:#fff;border-radius:20px;overflow:hidden; }
+.uvu-bridge-panel .uvu-bridge-route { align-self:stretch;justify-content:space-between;min-height:52px;padding:14px 16px;border-radius:0;background:transparent;font-size:14px; }
+.uvu-bridge-panel .uvu-bridge-route + .uvu-bridge-route { border-top:.5px solid var(--bridge-line); }
+.uvu-bridge-panel .uvu-bridge-route::after { content:'›';font:20px/1 sans-serif;color:var(--bridge-muted); }
+.uvu-bridge-panel .uvu-bridge-identity { background:#f2f2f7;line-height:1.7; }
+.uvu-bridge-panel .uvu-bridge-review-list { gap:12px;max-height:440px; }
+.uvu-bridge-panel .uvu-bridge-review-list > details { border:0;border-radius:16px;background:#f2f2f7;padding:14px; }
+.uvu-bridge-panel .uvu-bridge-review-list summary { gap:12px;font-size:14px;line-height:1.7; }
+.uvu-bridge-panel .uvu-bridge-review-list input[type=checkbox] { flex:0 0 18px;width:18px;height:18px;accent-color:#0088ff; }
+.uvu-bridge-panel .uvu-bridge-review-list textarea { background:#fff;font-size:14px;line-height:1.8;margin-top:12px; }
+.uvu-bridge-panel :is(button,input,select,textarea,summary):focus-visible { outline-color:#006bc7; }
+.uvu-bridge-panel .uvu-bridge-version-actions { gap:8px; }
+@media(max-width:350px) { .uvu-bridge-panel .uvu-bridge-fields { padding:0 16px 20px; } .uvu-bridge-panel .uvu-bridge-row { display:flex;gap:8px; } .uvu-bridge-panel .uvu-bridge-row > button { flex:1 1 120px;width:auto; } }
+@media(prefers-reduced-motion:reduce) { .uvu-bridge-panel * { transition:none !important;scroll-behavior:auto !important; } }

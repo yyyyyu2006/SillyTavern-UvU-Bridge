@@ -1069,12 +1069,23 @@ function layoutBridgePanel() {
     fields.replaceChildren();
     group('',[master]);const connection=group('连接',[status,version,check,retry]);if(connection)connection.classList.add('uvu-bridge-connection-card');
     if(tt)fields.append(tt);
-    group('角色与存档',[identity,binding]);
+    const target=group('角色与存档',[identity,binding]);
     const pairingBox=node('details','uvu-bridge-task uvu-bridge-pairing');pairingBox.append(node('summary','','配对与设备'),...[pairRow,pairing].filter(Boolean));fields.append(pairingBox);
-    group('当前剧情',[inject,scenes,cancel]);
+    const scene=group('当前剧情',[inject,scenes,cancel]);
     if(review) {review.classList.add('uvu-bridge-task');review.open=true;fields.append(review);}
     const extraction=node('details','uvu-bridge-task');extraction.append(node('summary','','正文识别'),...tags.filter(Boolean));fields.append(extraction);
     const help=node('details','uvu-bridge-task');help.append(node('summary','','使用说明'),...remaining);fields.append(help);
+    // Presentation routes reveal the existing task; they do not run network or scene actions.
+    const routes=node('nav','uvu-bridge-routes');routes.setAttribute('aria-label','互通任务');
+    for(const [label,destination]of [['线上存档审核',review],['发送当前剧情',scene],['正文提取',extraction],['长期绑定',pairingBox]]) {
+        if(!destination)continue;const action=node('button','uvu-bridge-route',label);action.type='button';action.setAttribute('aria-label',label);
+        action.onclick=()=>{if(destination.tagName==='DETAILS')destination.open=true;destination.scrollIntoView({block:'start',behavior:'instant'});const heading=destination.querySelector('summary,h3');if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}};
+        routes.append(action);
+    }
+    if(target)target.after(routes);
+    if(review)review.classList.add('uvu-bridge-review-task');
+    extraction.classList.add('uvu-bridge-extraction-task');
+    if(check){const tools=node('div','uvu-bridge-row uvu-bridge-version-actions');check.before(tools);tools.append(check);if(retry)tools.append(retry);}
 }
 
 function renderPanel() {

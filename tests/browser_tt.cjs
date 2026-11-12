@@ -33,6 +33,11 @@ const root=path.resolve(__dirname,'..');
  }
  try{
   await initialize();assert.equal(await page.locator('[data-tt-config]').isVisible(),true);
+  assert.equal(await page.locator('.uvu-bridge-route').count(),4);
+  await page.getByRole('button',{name:'正文提取',exact:true}).click();
+  assert.equal(await page.locator('.uvu-bridge-extraction-task').evaluate(el=>el.open),true);
+  assert.equal(await page.locator('[data-body-tags]').isVisible(),true);
+  await page.locator('.uvu-bridge-extraction-task > summary').click();
   assert.equal(await page.locator('[data-tt-mode]').inputValue(),'file');
   for(const selector of ['[data-tt-endpoint]','[data-tt-secret]','[data-action="pair"]','[data-pairing-panel]','[data-st-only]','[data-action="phone-mode"]'])assert.equal(await page.locator(selector).isVisible(),false,selector);
   assert.match(await page.locator('[data-bridge-status]').innerText(),/文件模式已就绪/);
